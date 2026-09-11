@@ -30,6 +30,10 @@ struct Opt {
     #[arg(short = 'I', long)]
     ignored_dirs: Vec<PathBuf>,
 
+    /// Do not honor Git ignore files or skip hidden directories while scanning.
+    #[arg(long)]
+    no_ignore: bool,
+
     /// Quiet mode. Won't output to the terminal. -qq prevents all output.
     #[arg(short, long, action = clap::ArgAction::Count, value_parser = clap::value_parser!(u8).range(0..3))]
     quiet: u8,
@@ -347,6 +351,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let scan_options: ScanOptions = ScanOptions {
         follow_symlinks: opt.follow_symlinks,
         same_file_system: opt.same_filesystem,
+        no_ignore: opt.no_ignore,
     };
 
     let (proj_discover_send, proj_discover_recv) = std::sync::mpsc::sync_channel::<DiscoverData>(5);

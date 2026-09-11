@@ -208,22 +208,27 @@ impl Project {
 
     pub fn last_modified(&self, options: &ScanOptions) -> Result<SystemTime, std::io::Error> {
         let top_level_modified = fs::metadata(&self.path)?.modified()?;
-        let most_recent_modified = ignore::WalkBuilder::new(&self.path)
-            .follow_links(options.follow_symlinks)
-            .same_file_system(options.same_file_system)
-            .build()
-            .fold(top_level_modified, |acc, e| {
-                if let Ok(e) = e {
-                    if let Ok(e) = e.metadata() {
-                        if let Ok(modified) = e.modified() {
-                            if modified > acc {
-                                return modified;
-                            }
-                        }
-                    }
-                }
-                acc
-            });
+        let most_recent_modified = if options.no_ignore {
+            walkdir::WalkDir::new(&self.path)
+                .follow_links(options.follow_symlinks)
+                .same_file_system(options.same_file_system)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .filter_map(|m| m.modified().ok())
+                .max()
+                .unwrap_or(top_level_modified)
+        } else {
+            ignore::WalkBuilder::new(&self.path)
+                .follow_links(options.follow_symlinks)
+                .same_file_system(options.same_file_system)
+                .build()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .filter_map(|m| m.modified().ok())
+                .max()
+                .unwrap_or(top_level_modified)
+        };
         Ok(most_recent_modified)
     }
 
@@ -360,6 +365,7 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 
 struct ProjectIter {
     it: walkdir::IntoIter,
+    no_ignore: bool,
 }
 
 pub enum Red {
@@ -380,7 +386,8 @@ impl Iterator for ProjectIter {
             if !entry.file_type().is_dir() {
                 continue;
             }
-            if is_hidden(&entry) {
+            // Do not treat the scan root `.` as a hidden directory.
+            if !self.no_ignore && entry.depth() > 0 && is_hidden(&entry) {
                 self.it.skip_current_dir();
                 continue;
             }
@@ -483,6 +490,7 @@ fn is_react_native_project(path: &Path) -> bool {
 pub struct ScanOptions {
     pub follow_symlinks: bool,
     pub same_file_system: bool,
+    pub no_ignore: bool,
 }
 
 fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> ProjectIter {
@@ -491,6 +499,7 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
             .follow_links(options.follow_symlinks)
             .same_file_system(options.same_file_system)
             .into_iter(),
+            no_ignore: options.no_ignore,
     }
 }
 
