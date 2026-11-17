@@ -8,10 +8,17 @@
 > **New usage examples:**
 >
 > ```sh
-> soji --dry-run --no-ignore --deep <dir>         # List everything detected and show total potential savings
-> soji --no-ignore --deep <dir>                   # Review each result and answer yes or no
-> soji --all --no-ignore --deep <dir>             # Clean all detected artifacts without confirmation; move them to Trash
-> soji --all --force-rm --no-ignore --deep <dir>  # ⚠️ Clean all detected artifacts without confirmation and permanently delete them
+> # List everything detected and show total potential savings
+> soji --dry-run --no-ignore --deep <dir>
+>
+> # Review each result and answer yes or no
+> soji --no-ignore --deep <dir>
+>
+> # Clean all detected artifacts without confirmation; move them to Trash
+> soji --all --no-ignore --deep <dir>
+>
+> # ⚠️ Clean all detected artifacts without confirmation and permanently delete them
+> soji --all --force-rm --no-ignore --deep <dir>
 > ```
 
 # Kondo 🧹
