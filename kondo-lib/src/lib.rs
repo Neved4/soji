@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::{HashMap, HashSet},
     error::{self, Error},
     fs,
     path::{self, Path},
@@ -8,6 +9,8 @@ use std::{
 
 const FILE_CARGO_TOML: &str = "Cargo.toml";
 const FILE_PACKAGE_JSON: &str = "package.json";
+const FILE_PYPROJECT_TOML: &str = "pyproject.toml";
+const FILE_SETUP_PY: &str = "setup.py";
 const FILE_ASSEMBLY_CSHARP: &str = "Assembly-CSharp.csproj";
 const FILE_STACK_HASKELL: &str = "stack.yaml";
 const FILE_CABAL_HASKELL: &str = "cabal.project";
@@ -33,8 +36,44 @@ const FILE_PROJECT_TURBOREPO: &str = "turbo.json";
 const FILE_PODFILE: &str = "Podfile";
 
 const PROJECT_CARGO_DIRS: [&str; 2] = ["target", ".xwin-cache"];
-const PROJECT_NODE_DIRS: [&str; 2] = ["node_modules", ".angular"];
-const PROJECT_REACT_NATIVE_DIRS: [&str; 8] = [
+const PROJECT_NODE_DIRS: [&str; 10] = [
+    "node_modules",
+    ".angular",
+    ".next",
+    ".cache",
+    ".turbo",
+    "dist",
+    "build",
+    "tmp",
+    "coverage",
+    ".nyc_output",
+];
+const GENERIC_ARTIFACT_DIRS: [&str; 23] = [
+    "node_modules",
+    ".angular",
+    ".next",
+    ".cache",
+    ".turbo",
+    "dist",
+    "build",
+    "tmp",
+    "target",
+    ".gradle",
+    "obj",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".build",
+    "Pods",
+    ".dart_tool",
+    ".terraform",
+    "coverage",
+    "out",
+];
+const PROJECT_REACT_NATIVE_DIRS: [&str; 16] = [
     "node_modules",
     "android/build",
     "android/.gradle",
@@ -43,6 +82,14 @@ const PROJECT_REACT_NATIVE_DIRS: [&str; 8] = [
     "ios/Pods",
     ".expo",
     ".metro",
+    "dist",
+    "build",
+    "tmp",
+    "coverage",
+    ".next",
+    ".cache",
+    ".turbo",
+    ".nyc_output",
 ];
 const PROJECT_UNITY_DIRS: [&str; 7] = [
     "Library",
@@ -67,7 +114,7 @@ const PROJECT_UNREAL_DIRS: [&str; 5] = [
     "Intermediate",
 ];
 const PROJECT_JUPYTER_DIRS: [&str; 1] = [".ipynb_checkpoints"];
-const PROJECT_PYTHON_DIRS: [&str; 7] = [
+const PROJECT_PYTHON_DIRS: [&str; 13] = [
     ".mypy_cache",
     ".nox",
     ".pytest_cache",
@@ -75,6 +122,12 @@ const PROJECT_PYTHON_DIRS: [&str; 7] = [
     ".tox",
     "__pycache__",
     "__pypackages__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "coverage",
+    "htmlcov",
 ];
 const PROJECT_PIXI_DIRS: [&str; 1] = [".pixi"];
 const PROJECT_COMPOSER_DIRS: [&str; 1] = ["vendor"];
@@ -144,6 +197,7 @@ pub enum ProjectType {
     Turborepo,
     Terraform,
     Cocoapods,
+    Generic,
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +214,7 @@ pub struct ProjectSize {
 }
 
 impl Project {
-    pub fn artifact_dirs(&self) -> &[&str] {
+    pub fn artifact_dirs(&self) -> &'static [&'static str] {
         match self.project_type {
             ProjectType::Cargo => &PROJECT_CARGO_DIRS,
             ProjectType::Node => {
@@ -191,6 +245,7 @@ impl Project {
             ProjectType::Turborepo => &PROJECT_TURBOREPO_DIRS,
             ProjectType::Terraform => &PROJECT_TERRAFORM_DIRS,
             ProjectType::Cocoapods => &PROJECT_COCOAPODS_DIRS,
+            ProjectType::Generic => &GENERIC_ARTIFACT_DIRS,
         }
     }
 
@@ -315,6 +370,7 @@ impl Project {
             ProjectType::Turborepo => PROJECT_TURBOREPO_NAME,
             ProjectType::Terraform => PROJECT_TERRAFORM_NAME,
             ProjectType::Cocoapods => PROJECT_COCOAPODS_NAME,
+            ProjectType::Generic => "Generated artifacts",
         }
     }
 
@@ -366,6 +422,10 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 struct ProjectIter {
     it: walkdir::IntoIter,
     no_ignore: bool,
+    deep: bool,
+    project_artifacts: HashMap<path::PathBuf, Vec<&'static str>>,
+    project_artifact_paths: HashSet<path::PathBuf>,
+    generic_roots: HashSet<path::PathBuf>,
 }
 
 pub enum Red {
@@ -386,15 +446,40 @@ impl Iterator for ProjectIter {
             if !entry.file_type().is_dir() {
                 continue;
             }
-            // Do not treat the scan root `.` as a hidden directory.
             if !self.no_ignore && entry.depth() > 0 && is_hidden(&entry) {
                 self.it.skip_current_dir();
+                continue;
+            }
+            let entry_name = entry.file_name().to_str().unwrap_or_default();
+            let parent = entry.path().parent();
+            let project_artifact = self.project_artifact_paths.contains(entry.path())
+                || parent
+                    .and_then(|path| self.project_artifacts.get(path))
+                    .is_some_and(|dirs| dirs.iter().any(|dir| *dir == entry_name));
+            let generic_artifact = GENERIC_ARTIFACT_DIRS.contains(&entry_name);
+            if entry.depth() > 0 && (project_artifact || generic_artifact) {
+                self.it.skip_current_dir();
+                if project_artifact {
+                    continue;
+                }
+                if let Some(parent) = parent {
+                    if self.project_artifacts.contains_key(parent)
+                        || !self.generic_roots.insert(parent.to_path_buf())
+                    {
+                        continue;
+                    }
+                    return Some(Ok(Project {
+                        project_type: ProjectType::Generic,
+                        path: parent.to_path_buf(),
+                    }));
+                }
                 continue;
             }
             let rd = match entry.path().read_dir() {
                 Err(e) => return Some(Err(Red::IOError(e))),
                 Ok(rd) => rd,
             };
+            let mut python_project = false;
             // intentionally ignoring errors while iterating the ReadDir
             // can't return them because we'll lose the context of where we are
             for dir_entry in rd
@@ -409,6 +494,7 @@ impl Iterator for ProjectIter {
                 let p_type = match file_name {
                     FILE_CARGO_TOML => Some(ProjectType::Cargo),
                     FILE_PACKAGE_JSON => Some(ProjectType::Node),
+                    FILE_PYPROJECT_TOML | FILE_SETUP_PY => Some(ProjectType::Python),
                     FILE_ASSEMBLY_CSHARP => Some(ProjectType::Unity),
                     FILE_STACK_HASKELL => Some(ProjectType::Stack),
                     FILE_CABAL_HASKELL => Some(ProjectType::Cabal),
@@ -434,7 +520,8 @@ impl Iterator for ProjectIter {
                         Some(ProjectType::Jupyter)
                     }
                     file_name if file_name.ends_with(FILE_PYTHON_SUFFIX) => {
-                        Some(ProjectType::Python)
+                        python_project = true;
+                        None
                     }
                     file_name
                         if file_name.ends_with(FILE_CSPROJ_SUFFIX)
@@ -451,12 +538,41 @@ impl Iterator for ProjectIter {
                     _ => None,
                 };
                 if let Some(project_type) = p_type {
-                    self.it.skip_current_dir();
-                    return Some(Ok(Project {
+                    let project = Project {
                         project_type,
                         path: entry.path().to_path_buf(),
-                    }));
+                    };
+                    self.project_artifacts
+                        .insert(project.path.clone(), project.artifact_dirs().to_vec());
+                    self.project_artifact_paths.extend(
+                        project
+                            .artifact_dirs()
+                            .iter()
+                            .map(|dir| project.path.join(dir)),
+                    );
+                    if !self.deep {
+                        self.it.skip_current_dir();
+                    }
+                    return Some(Ok(project));
                 }
+            }
+            if python_project {
+                let project = Project {
+                    project_type: ProjectType::Python,
+                    path: entry.path().to_path_buf(),
+                };
+                self.project_artifacts
+                    .insert(project.path.clone(), project.artifact_dirs().to_vec());
+                self.project_artifact_paths.extend(
+                    project
+                        .artifact_dirs()
+                        .iter()
+                        .map(|dir| project.path.join(dir)),
+                );
+                if !self.deep {
+                    self.it.skip_current_dir();
+                }
+                return Some(Ok(project));
             }
         }
     }
@@ -491,6 +607,7 @@ pub struct ScanOptions {
     pub follow_symlinks: bool,
     pub same_file_system: bool,
     pub no_ignore: bool,
+    pub deep: bool,
 }
 
 fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> ProjectIter {
@@ -499,7 +616,11 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
             .follow_links(options.follow_symlinks)
             .same_file_system(options.same_file_system)
             .into_iter(),
-            no_ignore: options.no_ignore,
+        no_ignore: options.no_ignore,
+        deep: options.deep,
+        project_artifacts: HashMap::new(),
+        project_artifact_paths: HashSet::new(),
+        generic_roots: HashSet::new(),
     }
 }
 

@@ -1,7 +1,8 @@
 use std::{
+    collections::HashSet,
     env::current_dir,
     error::Error,
-    fmt,
+    fmt, fs,
     io::{stdin, stdout, Write},
     num::ParseIntError,
     path::PathBuf,
@@ -41,6 +42,13 @@ struct Opt {
     /// Clean all found projects without confirmation.
     #[arg(short, long)]
     all: bool,
+
+    #[arg(
+        short = 'f',
+        long = "force-rm",
+        help = "Permanently remove artifacts instead of moving them to system Trash"
+    )]
+    force_rm: bool,
 
     /// Follow symbolic links
     #[arg(short = 'L', long)]
@@ -166,11 +174,18 @@ fn discover(
     result_sender: SyncSender<DiscoverData>,
     ignored_dirs: &[PathBuf],
 ) {
+    let mut discovered_paths = HashSet::new();
     for project in dirs
         .iter()
         .flat_map(|dir| scan(dir, scan_options))
         .filter_map(|p| p.ok())
         .filter(|p| ignored_dirs.iter().all(|i| !p.path.starts_with(i)))
+        .filter(|p| {
+            discovered_paths.insert((
+                p.path.clone(),
+                matches!(p.project_type, kondo_lib::ProjectType::Generic),
+            ))
+        })
     {
         let artifact_dir_sizes: Vec<_> = project
             .artifact_dirs()
@@ -352,6 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         follow_symlinks: opt.follow_symlinks,
         same_file_system: opt.same_filesystem,
         no_ignore: opt.no_ignore,
+        deep: opt.deep,
     };
 
     let (proj_discover_send, proj_discover_recv) = std::sync::mpsc::sync_channel::<DiscoverData>(5);
@@ -377,7 +393,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     });
 
-    let delete_handle = std::thread::spawn(move || process_deletes(proj_delete_recv));
+    let force_rm = opt.force_rm;
+    let delete_handle = std::thread::spawn(move || process_deletes(proj_delete_recv, force_rm));
 
     let (total_projects, total_bytes) = interactive_prompt(
         proj_discover_recv,
