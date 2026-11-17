@@ -61,10 +61,12 @@ pub(super) fn game_plugin(app: &mut App) {
     );
 
     app.add_systems(Update, send_scroll_events);
+    app.add_systems(Update, update_project_filter_label);
 
     app.add_observer(on_scroll_handler);
 
     app.insert_resource(SelectedProject(None));
+    app.insert_resource(UiScanState::default());
 
     app.insert_non_send_resource(BackgroundThreadCommunication::default());
 }
@@ -139,6 +141,60 @@ fn setup(mut c: Commands) {
 
 #[derive(Resource, Deref, DerefMut)]
 struct ProjectList(Vec<ProjectListEntry>);
+
+#[derive(Resource, Default)]
+struct UiScanState {
+    directories: Vec<PathBuf>,
+    project_type_filter: Option<kondo_lib::ProjectType>,
+}
+
+#[derive(Component)]
+struct ProjectFilterLabel;
+
+fn project_filter_label(filter: Option<kondo_lib::ProjectType>) -> String {
+    match filter {
+        Some(project_type) => format!("Filter: {}", project_type.id()),
+        None => "Filter: All types".to_owned(),
+    }
+}
+
+fn update_project_filter_label(
+    state: Res<UiScanState>,
+    mut label: Single<&mut Text, With<ProjectFilterLabel>>,
+) {
+    if state.is_changed() {
+        label.0 = project_filter_label(state.project_type_filter);
+    }
+}
+
+fn cycle_project_type_filter(
+    _: On<Activate>,
+    mut state: ResMut<UiScanState>,
+    tc: NonSend<BackgroundThreadCommunication>,
+) {
+    state.project_type_filter = next_project_type_filter(state.project_type_filter);
+
+    if !state.directories.is_empty() {
+        launch_scan(
+            state.directories.clone(),
+            state.project_type_filter,
+            tc.send.clone(),
+        );
+    }
+}
+
+fn next_project_type_filter(
+    current: Option<kondo_lib::ProjectType>,
+) -> Option<kondo_lib::ProjectType> {
+    let next_index = current
+        .and_then(|current| {
+            kondo_lib::ProjectType::ALL
+                .iter()
+                .position(|project_type| *project_type == current)
+        })
+        .map_or(0, |index| index + 1);
+    kondo_lib::ProjectType::ALL.get(next_index).copied()
+}
 
 fn spawn_project_list(
     root_ui: Single<Entity, With<RootUITag>>,
@@ -410,16 +466,51 @@ fn update_project_list_ui(
 #[derive(Component)]
 struct RootUITag;
 
-fn discover_projects(dirs: &[std::path::PathBuf]) -> impl Iterator<Item = kondo_lib::Project> {
-    dirs.iter()
-        .flatten()
-        .flat_map(|dir| kondo_lib::scan(&dir, SCAN_OPTIONS))
-        .filter_map(Result::ok)
+fn scan_options(filter: Option<kondo_lib::ProjectType>) -> kondo_lib::ScanOptions {
+    let mut options = SCAN_OPTIONS.clone();
+    options.project_filter = match filter {
+        Some(project_type) => kondo_lib::ProjectFilter::Only(vec![project_type]),
+        None => kondo_lib::ProjectFilter::All,
+    };
+    options
+}
+
+fn launch_scan(
+    dirs: Vec<PathBuf>,
+    filter: Option<kondo_lib::ProjectType>,
+    send: Sender<BackgroundThreadMsg>,
+) {
+    std::thread::spawn(move || {
+        if send
+            .send(BackgroundThreadMsg::ScanningStarted(dirs.clone()))
+            .is_err()
+        {
+            return;
+        }
+
+        let options = scan_options(filter);
+        for dir in &dirs {
+            info!("Searching {:?}", dir);
+            for raw_proj in kondo_lib::scan(dir, &options).filter_map(Result::ok) {
+                let proj_entry = ProjectListEntry {
+                    size: raw_proj.size(&options),
+                    kproj: raw_proj,
+                    status: ProjectListEntryStatus::Uncleaned,
+                };
+
+                if send.send(BackgroundThreadMsg::Ple(proj_entry)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn process_new_projects(
     tc: NonSend<BackgroundThreadCommunication>,
     mut pl: ResMut<ProjectList>,
+    mut selected: ResMut<SelectedProject>,
+    mut scan_state: ResMut<UiScanState>,
     sdl: Query<Entity, With<ScanningDirsListTag>>,
     mut c: Commands,
 ) {
@@ -427,6 +518,8 @@ fn process_new_projects(
         match msg {
             BackgroundThreadMsg::ScanningStarted(dirs) => {
                 pl.clear();
+                selected.0 = None;
+                scan_state.directories = dirs.clone();
 
                 if let Some(sdl) = sdl.iter().next() {
                     c.entity(sdl).despawn_children();
@@ -443,46 +536,19 @@ fn process_new_projects(
     }
 }
 
-fn select_directory(_: On<Activate>, tc: NonSend<BackgroundThreadCommunication>) {
+fn select_directory(
+    _: On<Activate>,
+    tc: NonSend<BackgroundThreadCommunication>,
+    state: Res<UiScanState>,
+) {
     let main_thread_send = tc.send.clone();
+    let filter = state.project_type_filter;
 
     std::thread::spawn(move || {
         let Some(dirs) = rfd::FileDialog::new().pick_folders() else {
             return;
         };
-
-        if main_thread_send
-            .send(BackgroundThreadMsg::ScanningStarted(dirs.clone()))
-            .is_err()
-        {
-            return;
-        }
-
-        let (raw_proj_send, raw_proj_recv) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            info!("Searching {:?}", &dirs);
-            for raw_proj in discover_projects(&dirs) {
-                if raw_proj_send.send(raw_proj).is_err() {
-                    return;
-                }
-            }
-        });
-
-        while let Ok(raw_proj) = raw_proj_recv.recv() {
-            let proj_entry = ProjectListEntry {
-                size: raw_proj.size(SCAN_OPTIONS),
-                kproj: raw_proj,
-                status: ProjectListEntryStatus::Uncleaned,
-            };
-
-            if main_thread_send
-                .send(BackgroundThreadMsg::Ple(proj_entry))
-                .is_err()
-            {
-                return;
-            }
-        }
+        launch_scan(dirs, filter, main_thread_send);
     });
 }
 
@@ -512,6 +578,18 @@ fn spawn_root(_: &mut Commands) -> impl Bundle {
                 ..default()
             },
             Children::spawn((
+                Spawn((
+                    button(
+                        ButtonProps::default(),
+                        (),
+                        Spawn((
+                            Text::new("Filter: All types"),
+                            ThemedText,
+                            ProjectFilterLabel,
+                        )),
+                    ),
+                    observe(cycle_project_type_filter),
+                )),
                 Spawn((
                     button(
                         ButtonProps::default(),
@@ -647,6 +725,24 @@ pub fn button_left<
         overrides,
         Children::spawn(children),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_type_filter_cycles_from_all_through_every_type_and_back() {
+        assert_eq!(
+            next_project_type_filter(None),
+            Some(kondo_lib::ProjectType::Cargo)
+        );
+
+        for (index, project_type) in kondo_lib::ProjectType::ALL.iter().enumerate() {
+            let expected = kondo_lib::ProjectType::ALL.get(index + 1).copied();
+            assert_eq!(next_project_type_filter(Some(*project_type)), expected);
+        }
+    }
 }
 
 #[derive(Resource)]
