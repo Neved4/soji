@@ -126,6 +126,7 @@ const SCAN_OPTIONS: &kondo_lib::ScanOptions = &kondo_lib::ScanOptions {
     no_ignore: false,
     deep: false,
     worktrees: true,
+    project_filter: kondo_lib::ProjectFilter::All,
 };
 
 fn setup(mut c: Commands) {

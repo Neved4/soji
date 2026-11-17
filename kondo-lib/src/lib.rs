@@ -175,7 +175,7 @@ const PROJECT_TERRAFORM_NAME: &str = "Terraform";
 const PROJECT_PLATFORMIO_NAME: &str = "PlatformIO";
 const PROJECT_COCOAPODS_NAME: &str = "CocoaPods";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectType {
     Cargo,
     Node,
@@ -203,6 +203,84 @@ pub enum ProjectType {
     PlatformIO,
     Cocoapods,
     Generic,
+}
+
+impl ProjectType {
+    pub const ALL: [ProjectType; 25] = [
+        ProjectType::Cargo,
+        ProjectType::Node,
+        ProjectType::Unity,
+        ProjectType::Stack,
+        ProjectType::Cabal,
+        ProjectType::SBT,
+        ProjectType::Maven,
+        ProjectType::Gradle,
+        ProjectType::CMake,
+        ProjectType::Unreal,
+        ProjectType::Jupyter,
+        ProjectType::Python,
+        ProjectType::Pixi,
+        ProjectType::Composer,
+        ProjectType::Pub,
+        ProjectType::Elixir,
+        ProjectType::Swift,
+        ProjectType::Zig,
+        ProjectType::Godot4,
+        ProjectType::Dotnet,
+        ProjectType::Turborepo,
+        ProjectType::Terraform,
+        ProjectType::PlatformIO,
+        ProjectType::Cocoapods,
+        ProjectType::Generic,
+    ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            ProjectType::Cargo => "cargo",
+            ProjectType::Node => "node",
+            ProjectType::Unity => "unity",
+            ProjectType::Stack => "stack",
+            ProjectType::Cabal => "cabal",
+            ProjectType::SBT => "sbt",
+            ProjectType::Maven => "maven",
+            ProjectType::Gradle => "gradle",
+            ProjectType::CMake => "cmake",
+            ProjectType::Unreal => "unreal",
+            ProjectType::Jupyter => "jupyter",
+            ProjectType::Python => "python",
+            ProjectType::Pixi => "pixi",
+            ProjectType::Composer => "composer",
+            ProjectType::Pub => "pub",
+            ProjectType::Elixir => "elixir",
+            ProjectType::Swift => "swift",
+            ProjectType::Zig => "zig",
+            ProjectType::Godot4 => "godot4",
+            ProjectType::Dotnet => "dotnet",
+            ProjectType::Turborepo => "turborepo",
+            ProjectType::Terraform => "terraform",
+            ProjectType::PlatformIO => "platformio",
+            ProjectType::Cocoapods => "cocoapods",
+            ProjectType::Generic => "generic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum ProjectFilter {
+    #[default]
+    All,
+    Only(Vec<ProjectType>),
+    Skip(Vec<ProjectType>),
+}
+
+impl ProjectFilter {
+    pub fn allows(&self, project_type: ProjectType) -> bool {
+        match self {
+            ProjectFilter::All => true,
+            ProjectFilter::Only(types) => types.contains(&project_type),
+            ProjectFilter::Skip(types) => !types.contains(&project_type),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -499,6 +577,7 @@ fn device(_path: &Path) -> Option<u64> {
 
 struct ProjectIter {
     it: walkdir::IntoIter,
+    project_filter: ProjectFilter,
     no_ignore: bool,
     deep: bool,
     worktrees: bool,
@@ -574,6 +653,9 @@ impl Iterator for ProjectIter {
                         project_type: ProjectType::Generic,
                         path: parent.to_path_buf(),
                     };
+                    if !self.project_filter.allows(ProjectType::Generic) {
+                        continue;
+                    }
                     if self.worktrees && !self.first_emit(&project.path) {
                         continue;
                     }
@@ -613,6 +695,7 @@ impl Iterator for ProjectIter {
                 continue;
             }
             let mut python_project = false;
+            let mut is_project = false;
             // intentionally ignoring errors while iterating the ReadDir
             // can't return them because we'll lose the context of where we are
             for dir_entry in entries
@@ -680,6 +763,7 @@ impl Iterator for ProjectIter {
                     _ => None,
                 };
                 if let Some(project_type) = p_type {
+                    is_project = true;
                     let project = Project {
                         project_type,
                         path: entry.path().to_path_buf(),
@@ -692,6 +776,9 @@ impl Iterator for ProjectIter {
                             .iter()
                             .map(|dir| project.path.join(dir)),
                     );
+                    if !self.project_filter.allows(project_type) {
+                        continue;
+                    }
                     if !self.deep {
                         self.it.skip_current_dir();
                     }
@@ -714,6 +801,12 @@ impl Iterator for ProjectIter {
                         .iter()
                         .map(|dir| project.path.join(dir)),
                 );
+                if !self.project_filter.allows(ProjectType::Python) {
+                    if !self.deep {
+                        self.it.skip_current_dir();
+                    }
+                    continue;
+                }
                 if !self.deep {
                     self.it.skip_current_dir();
                 }
@@ -721,6 +814,9 @@ impl Iterator for ProjectIter {
                     continue;
                 }
                 return Some(Ok(project));
+            }
+            if is_project && !self.deep {
+                self.it.skip_current_dir();
             }
         }
     }
@@ -769,6 +865,7 @@ pub struct ScanOptions {
     pub deep: bool,
     /// Discover registered linked Git worktrees inside the scan root.
     pub worktrees: bool,
+    pub project_filter: ProjectFilter,
 }
 
 fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> ProjectIter {
@@ -785,6 +882,7 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
             .into_iter(),
         no_ignore: options.no_ignore,
         deep: options.deep,
+        project_filter: options.project_filter.clone(),
         worktrees: options.worktrees,
         follow_symlinks: options.follow_symlinks,
         same_file_system: options.same_file_system,
@@ -933,7 +1031,7 @@ pub fn path_canonicalise(
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, print_elapsed, scan, ScanOptions};
+    use super::{clean, print_elapsed, scan, ProjectFilter, ProjectType, ScanOptions};
     use std::{
         fs,
         path::PathBuf,
@@ -981,6 +1079,7 @@ mod tests {
             no_ignore: false,
             deep: false,
             worktrees: false,
+            project_filter: ProjectFilter::All,
         };
         let projects = scan(&fixture.0, &options)
             .map(|result| match result {
@@ -1027,6 +1126,7 @@ mod tests {
             no_ignore: false,
             deep: false,
             worktrees: false,
+            project_filter: ProjectFilter::All,
         };
 
         for marker in ["turbo.json", "turbo.jsonc"] {
@@ -1079,6 +1179,7 @@ mod tests {
             no_ignore: false,
             deep: false,
             worktrees: false,
+            project_filter: ProjectFilter::All,
         };
         let projects = scan(&fixture.0, &options)
             .map(|result| match result {
@@ -1107,6 +1208,91 @@ mod tests {
         clean(fixture.0.to_str().unwrap()).unwrap();
 
         assert!(fixture.0.join(".pio").exists());
+    }
+
+    fn scan_options(project_filter: ProjectFilter, deep: bool) -> ScanOptions {
+        ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep,
+            worktrees: false,
+            project_filter,
+        }
+    }
+
+    fn scanned_projects(fixture: &Fixture, options: &ScanOptions) -> Vec<(ProjectType, PathBuf)> {
+        scan(&fixture.0, options)
+            .map(|result| {
+                let project = match result {
+                    Ok(project) => project,
+                    Err(_) => panic!("scan fixture without filesystem errors"),
+                };
+                (project.project_type, project.path)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn project_filters_select_allowed_marker_when_a_directory_has_multiple_types() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
+
+        let only_cargo = scan_options(ProjectFilter::Only(vec![ProjectType::Cargo]), false);
+        assert_eq!(
+            scanned_projects(&fixture, &only_cargo),
+            [(ProjectType::Cargo, fixture.0.clone())]
+        );
+
+        let skip_cargo = scan_options(ProjectFilter::Skip(vec![ProjectType::Cargo]), false);
+        assert_eq!(
+            scanned_projects(&fixture, &skip_cargo),
+            [(ProjectType::Node, fixture.0.clone())]
+        );
+    }
+
+    #[test]
+    fn only_and_skip_filters_include_generic_and_platformio_types() {
+        let generic = Fixture::new();
+        fs::create_dir(generic.0.join("target")).unwrap();
+        assert_eq!(
+            scanned_projects(
+                &generic,
+                &scan_options(ProjectFilter::Only(vec![ProjectType::Generic]), false)
+            ),
+            [(ProjectType::Generic, generic.0.clone())]
+        );
+
+        let platformio = Fixture::new();
+        fs::write(platformio.0.join("platformio.ini"), "[env:test]\n").unwrap();
+        fs::write(platformio.0.join("CMakeLists.txt"), "project(test)\n").unwrap();
+        assert_eq!(
+            scanned_projects(
+                &platformio,
+                &scan_options(ProjectFilter::Only(vec![ProjectType::PlatformIO]), false)
+            ),
+            [(ProjectType::PlatformIO, platformio.0.clone())]
+        );
+        assert!(ProjectType::ALL.iter().any(|ty| ty.id() == "generic"));
+        assert!(ProjectType::ALL.iter().any(|ty| ty.id() == "platformio"));
+    }
+
+    #[test]
+    fn deep_scan_finds_allowed_nested_projects_inside_filtered_projects() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
+        fs::create_dir_all(fixture.0.join("node_modules")).unwrap();
+        let nested = fixture.0.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("Cargo.toml"), "[package]\n").unwrap();
+
+        let only_cargo = ProjectFilter::Only(vec![ProjectType::Cargo]);
+        assert!(scanned_projects(&fixture, &scan_options(only_cargo.clone(), false)).is_empty());
+        assert_eq!(
+            scanned_projects(&fixture, &scan_options(only_cargo, true)),
+            [(ProjectType::Cargo, nested)]
+        );
     }
 
     #[test]
@@ -1161,6 +1347,7 @@ mod tests {
             no_ignore: false,
             deep: true,
             worktrees: true,
+            project_filter: ProjectFilter::All,
         };
         let mut projects = scan(&root, &options)
             .map(|result| match result {
@@ -1229,6 +1416,7 @@ mod tests {
             no_ignore: false,
             deep: false,
             worktrees: true,
+            project_filter: ProjectFilter::All,
         };
         assert_eq!(
             scan(&root, &options)
@@ -1297,6 +1485,7 @@ mod tests {
             no_ignore: false,
             deep: false,
             worktrees: true,
+            project_filter: ProjectFilter::All,
         };
         let projects = scan(&fixture.0, &options)
             .map(|result| match result {

@@ -9,11 +9,15 @@ use std::{
     sync::mpsc::{Receiver, Sender, SyncSender},
 };
 
-use clap::{Command, CommandFactory, Parser};
+use clap::{
+    builder::{PossibleValuesParser, TypedValueParser},
+    Command, CommandFactory, Parser,
+};
 use clap_complete::{generate, Generator, Shell};
 
 use kondo_lib::{
-    dir_size, path_canonicalise, pretty_size, print_elapsed, scan, Project, ScanOptions,
+    dir_size, path_canonicalise, pretty_size, print_elapsed, scan, Project, ProjectFilter,
+    ProjectType, ScanOptions,
 };
 
 // Below needs updating every time a new project type is added!
@@ -21,7 +25,9 @@ use kondo_lib::{
 #[command(name = "soji")]
 /// Kondo recursively cleans project directories.
 ///
-/// Supported project types: Cargo, Node, Unity, SBT, Haskell Stack, Maven, Unreal Engine, Jupyter Notebook, Python, Jupyter Notebooks, CMake, Composer, Pub, Elixir, Swift, Gradle, and .NET projects.
+/// Supported project types include Cargo, Node, Unity, Stack, Cabal, SBT, Maven, Gradle,
+/// CMake, Unreal, Jupyter, Python, Pixi, Composer, Pub, Elixir, Swift, Zig, Godot, .NET,
+/// Turborepo, Terraform, PlatformIO, CocoaPods, and generated artifacts.
 struct Opt {
     /// The directories to examine. Current directory will be used if DIRS is omitted.
     #[arg(name = "DIRS")]
@@ -34,6 +40,14 @@ struct Opt {
     /// Do not honor Git ignore files or skip hidden directories while scanning.
     #[arg(short = 'i', long)]
     no_ignore: bool,
+
+    /// Only scan these project types (comma-separated; repeatable).
+    #[arg(long, value_delimiter = ',', value_parser = project_type_parser(), conflicts_with = "skip")]
+    only: Vec<ProjectType>,
+
+    /// Skip these project types (comma-separated; repeatable).
+    #[arg(long, value_delimiter = ',', value_parser = project_type_parser(), conflicts_with = "only")]
+    skip: Vec<ProjectType>,
 
     #[arg(
         short = 'D',
@@ -88,6 +102,15 @@ struct Opt {
     /// Accept one-letter input without waiting for the Enter key.
     #[arg(long)]
     single_key: bool,
+}
+
+fn project_type_parser() -> impl TypedValueParser<Value = ProjectType> {
+    PossibleValuesParser::new(ProjectType::ALL.map(|project_type| project_type.id())).map(|id| {
+        ProjectType::ALL
+            .into_iter()
+            .find(|project_type| project_type.id() == id)
+            .expect("possible values come from ProjectType::ALL")
+    })
 }
 
 fn prepare_directories(dirs: Vec<PathBuf>) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -395,6 +418,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         no_ignore: opt.no_ignore,
         deep: opt.deep,
         worktrees: !opt.no_worktrees,
+        project_filter: if !opt.only.is_empty() {
+            ProjectFilter::Only(std::mem::take(&mut opt.only))
+        } else if !opt.skip.is_empty() {
+            ProjectFilter::Skip(std::mem::take(&mut opt.skip))
+        } else {
+            ProjectFilter::All
+        },
     };
 
     let (proj_discover_send, proj_discover_recv) = std::sync::mpsc::sync_channel::<DiscoverData>(5);
@@ -455,4 +485,52 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{Opt, ProjectType};
+    use clap::Parser;
+
+    #[test]
+    fn project_type_filters_accept_comma_separated_and_repeated_values() {
+        let opt = Opt::try_parse_from([
+            "soji",
+            "--only",
+            "cargo,node",
+            "--only",
+            "platformio",
+            "--skip",
+            "python",
+        ]);
+        assert!(opt.is_err(), "--only and --skip must conflict");
+
+        let opt =
+            Opt::try_parse_from(["soji", "--only", "cargo,node", "--only", "platformio"]).unwrap();
+        assert_eq!(
+            opt.only,
+            [
+                ProjectType::Cargo,
+                ProjectType::Node,
+                ProjectType::PlatformIO
+            ]
+        );
+        assert!(opt.skip.is_empty());
+
+        let opt = Opt::try_parse_from(["soji", "--skip", "python,generic", "--skip", "cocoapods"])
+            .unwrap();
+        assert_eq!(
+            opt.skip,
+            [
+                ProjectType::Python,
+                ProjectType::Generic,
+                ProjectType::Cocoapods
+            ]
+        );
+    }
+
+    #[test]
+    fn project_type_filters_reject_unknown_ids() {
+        assert!(Opt::try_parse_from(["soji", "--only", "not-a-project-type"]).is_err());
+    }
 }
