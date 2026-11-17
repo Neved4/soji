@@ -1,5 +1,12 @@
 # Kondo 🧹
 
+> [!IMPORTANT]
+> This is basically upstream Kondo with these fork-specific features:
+>
+> - Broader artifact detection, including generic generated folders and expanded language/framework build and cache directories.
+> - Deep scanning for nested projects and artifacts (`-D`), with an option to include ignored and hidden paths (`-i`). The CLI command is `kanso`.
+> - Artifacts go to the system Trash or Recycle Bin by default; use `--force-rm` (`-f`) for permanent removal.
+
 Cleans `node_modules`, `target`, `build`, and friends from your projects.
 
 Excellent if
