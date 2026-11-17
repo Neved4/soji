@@ -6,6 +6,8 @@ on:
   workflow_dispatch:
 
 name: Soji Deploy
+permissions:
+  contents: write
 env:
   BIN: soji
 
