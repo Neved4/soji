@@ -628,7 +628,7 @@ impl Iterator for ProjectIter {
             let project_artifact = self.project_artifact_paths.contains(entry.path())
                 || parent
                     .and_then(|path| self.project_artifacts.get(path))
-                    .is_some_and(|dirs| dirs.iter().any(|dir| *dir == entry_name));
+                    .is_some_and(|dirs| dirs.contains(&entry_name));
             let generic_artifact = GENERIC_ARTIFACT_DIRS.contains(&entry_name);
             // A project virtual environment contains installed dependencies, not disposable
             // Python caches. Keep it even though `.venv` is a generic artifact name elsewhere.
