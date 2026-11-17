@@ -34,6 +34,7 @@ const FILE_CSPROJ_SUFFIX: &str = ".csproj";
 const FILE_FSPROJ_SUFFIX: &str = ".fsproj";
 const FILE_TERRAFORM_HCL: &str = ".terraform.lock.hcl";
 const FILE_PROJECT_TURBOREPO: &str = "turbo.json";
+const FILE_PROJECT_TURBOREPO_JSONC: &str = "turbo.jsonc";
 const FILE_PODFILE: &str = "Podfile";
 
 const PROJECT_CARGO_DIRS: [&str; 2] = ["target", ".xwin-cache"];
@@ -520,6 +521,7 @@ impl Iterator for ProjectIter {
                     FILE_BUILD_ZIG => Some(ProjectType::Zig),
                     FILE_GODOT_4_PROJECT => Some(ProjectType::Godot4),
                     FILE_PROJECT_TURBOREPO => Some(ProjectType::Turborepo),
+                    FILE_PROJECT_TURBOREPO_JSONC => Some(ProjectType::Turborepo),
                     FILE_TERRAFORM_HCL => Some(ProjectType::Terraform),
                     FILE_PODFILE => Some(ProjectType::Cocoapods),
                     file_name if file_name.ends_with(FILE_UNREAL_SUFFIX) => {
@@ -700,6 +702,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
                 FILE_SWIFT_PACKAGE => Some(ProjectType::Swift),
                 FILE_BUILD_ZIG => Some(ProjectType::Zig),
                 FILE_GODOT_4_PROJECT => Some(ProjectType::Godot4),
+                FILE_PROJECT_TURBOREPO | FILE_PROJECT_TURBOREPO_JSONC
+                    if dir_entry
+                        .file_type()
+                        .is_ok_and(|file_type| file_type.is_file()) =>
+                {
+                    Some(ProjectType::Turborepo)
+                }
                 FILE_TERRAFORM_HCL => Some(ProjectType::Terraform),
                 FILE_PODFILE => Some(ProjectType::Cocoapods),
                 _ => None,
@@ -825,6 +834,45 @@ mod tests {
             clean(fixture.0.to_str().unwrap()).unwrap();
             assert!(fixture.0.join("__pycache__").exists());
         }
+    }
+
+    #[test]
+    fn turbo_jsonc_detects_and_cleans_turborepo_projects() {
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+        };
+
+        for marker in ["turbo.json", "turbo.jsonc"] {
+            let fixture = Fixture::new();
+            fs::write(
+                fixture.0.join(marker),
+                "{\"$schema\": \"https://turbo.build/schema.json\"}\n",
+            )
+            .unwrap();
+            fs::create_dir_all(fixture.0.join(".turbo/cache")).unwrap();
+
+            let projects = scan(&fixture.0, &options)
+                .map(|result| match result {
+                    Ok(project) => project,
+                    Err(_) => panic!("scan fixture without filesystem errors"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(projects.len(), 1);
+            assert_eq!(projects[0].type_name(), "Turborepo");
+            assert_eq!(projects[0].path, fixture.0);
+
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(!fixture.0.join(".turbo").exists());
+        }
+
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join("turbo.jsonc")).unwrap();
+        fs::create_dir(fixture.0.join(".turbo")).unwrap();
+        clean(fixture.0.to_str().unwrap()).unwrap();
+        assert!(fixture.0.join(".turbo").exists());
     }
 
     #[test]
