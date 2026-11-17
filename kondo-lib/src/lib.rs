@@ -818,13 +818,7 @@ impl Iterator for ProjectIter {
                         if file_name.ends_with(FILE_CSPROJ_SUFFIX)
                             || file_name.ends_with(FILE_FSPROJ_SUFFIX) =>
                     {
-                        if dir_contains_file(entry.path(), FILE_GODOT_4_PROJECT) {
-                            Some(ProjectType::Godot4)
-                        } else if dir_contains_file(entry.path(), FILE_ASSEMBLY_CSHARP) {
-                            Some(ProjectType::Unity)
-                        } else {
-                            Some(ProjectType::Dotnet)
-                        }
+                        Some(dotnet_project_type(entry.path()))
                     }
                     _ => None,
                 };
@@ -921,6 +915,22 @@ fn dir_contains_subdir(path: &Path, subdir: &str) -> bool {
 
 fn is_react_native_project(path: &Path) -> bool {
     dir_contains_subdir(path, "ios") || dir_contains_subdir(path, "android")
+}
+
+fn is_unity_project(path: &Path) -> bool {
+    dir_contains_file(path, FILE_ASSEMBLY_CSHARP)
+        || (dir_contains_subdir(path, "Assets")
+            && path.join("ProjectSettings/ProjectVersion.txt").is_file())
+}
+
+fn dotnet_project_type(path: &Path) -> ProjectType {
+    if dir_contains_file(path, FILE_GODOT_4_PROJECT) {
+        ProjectType::Godot4
+    } else if is_unity_project(path) {
+        ProjectType::Unity
+    } else {
+        ProjectType::Dotnet
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1047,6 +1057,15 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
                 FILE_SWIFT_PACKAGE => Some(ProjectType::Swift),
                 FILE_BUILD_ZIG => Some(ProjectType::Zig),
                 FILE_GODOT_4_PROJECT => Some(ProjectType::Godot4),
+                file_name
+                    if (file_name.ends_with(FILE_CSPROJ_SUFFIX)
+                        || file_name.ends_with(FILE_FSPROJ_SUFFIX))
+                        && dir_entry
+                            .file_type()
+                            .is_ok_and(|file_type| file_type.is_file()) =>
+                {
+                    Some(dotnet_project_type(Path::new(project_path)))
+                }
                 FILE_PROJECT_TURBOREPO | FILE_PROJECT_TURBOREPO_JSONC
                     if dir_entry
                         .file_type()
@@ -1197,6 +1216,64 @@ mod tests {
             fs::create_dir(fixture.0.join("__pycache__")).unwrap();
             clean(fixture.0.to_str().unwrap()).unwrap();
             assert!(fixture.0.join("__pycache__").exists());
+        }
+    }
+
+    #[test]
+    fn unity_project_evidence_precedes_generic_csproj_detection() {
+        let unity = Fixture::new();
+        fs::write(unity.0.join("Mesh101.csproj"), "<Project />\n").unwrap();
+        fs::create_dir_all(unity.0.join("Assets")).unwrap();
+        fs::create_dir_all(unity.0.join("ProjectSettings")).unwrap();
+        fs::write(
+            unity.0.join("ProjectSettings/ProjectVersion.txt"),
+            "m_EditorVersion: 2022.3.0f1\n",
+        )
+        .unwrap();
+        fs::create_dir_all(unity.0.join("Library/Artifacts")).unwrap();
+
+        assert_eq!(
+            scanned_projects(&unity, &scan_options(ProjectFilter::All, false)),
+            [(ProjectType::Unity, unity.0.clone())]
+        );
+
+        let unity_project = Project {
+            project_type: ProjectType::Unity,
+            path: unity.0.clone(),
+        };
+        unity_project.clean();
+        assert!(!unity.0.join("Library").exists());
+
+        fs::create_dir_all(unity.0.join("Library/Artifacts")).unwrap();
+        clean(unity.0.to_str().unwrap()).unwrap();
+        assert!(!unity.0.join("Library").exists());
+        assert!(unity.0.join("Mesh101.csproj").exists());
+        assert!(unity.0.join("ProjectSettings/ProjectVersion.txt").exists());
+    }
+
+    #[test]
+    fn ordinary_dotnet_projects_without_both_unity_markers_stay_dotnet() {
+        for include_assets in [false, true] {
+            let fixture = Fixture::new();
+            fs::write(fixture.0.join("App.csproj"), "<Project />\n").unwrap();
+            if include_assets {
+                fs::create_dir(fixture.0.join("Assets")).unwrap();
+            }
+            fs::create_dir_all(fixture.0.join("ProjectSettings")).unwrap();
+            fs::write(
+                fixture.0.join("ProjectSettings/EditorSettings.asset"),
+                "settings\n",
+            )
+            .unwrap();
+            fs::create_dir_all(fixture.0.join("obj")).unwrap();
+
+            assert_eq!(
+                scanned_projects(&fixture, &scan_options(ProjectFilter::All, false)),
+                [(ProjectType::Dotnet, fixture.0.clone())]
+            );
+
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(!fixture.0.join("obj").exists());
         }
     }
 
