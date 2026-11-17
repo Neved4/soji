@@ -107,6 +107,10 @@ struct Opt {
     #[arg(short = 'n', long, conflicts_with = "all")]
     dry_run: bool,
 
+    /// Print only artifact directory paths, one per line, without cleaning them.
+    #[arg(long, conflicts_with = "all")]
+    paths_only: bool,
+
     /// Accept one-letter input without waiting for the Enter key.
     #[arg(long)]
     single_key: bool,
@@ -394,6 +398,7 @@ fn interactive_prompt(
     default: bool,
     dry_run: bool,
     single_key: bool,
+    paths_only: bool,
 ) -> (usize, u64) {
     let mut total_projects = 0;
     let mut total_bytes = 0;
@@ -402,7 +407,13 @@ fn interactive_prompt(
         total_projects += 1;
         total_bytes += artifact_bytes;
 
-        if quiet == 0 {
+        if paths_only {
+            for (_, path) in project.artifact_paths() {
+                if path.is_dir() {
+                    println!("{}", path.display());
+                }
+            }
+        } else if quiet == 0 {
             println!(
                 "{} {} project {last_modified}",
                 project.name(),
@@ -556,8 +567,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         opt.quiet,
         opt.all,
         opt.default,
-        opt.dry_run,
+        opt.dry_run || opt.paths_only,
         opt.single_key,
+        opt.paths_only,
     );
 
     let delete_results = match delete_handle.join() {
@@ -568,7 +580,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    if opt.quiet < 2 {
+    if !opt.paths_only && opt.quiet < 2 {
         let projects_cleaned = delete_results.len();
         let bytes_deleted = delete_results.iter().map(|(_, bytes)| bytes).sum();
 
@@ -637,6 +649,14 @@ mod cli_tests {
     fn sort_size_flag_is_parsed() {
         let opt = Opt::try_parse_from(["soji", "--sort-size"]).unwrap();
         assert!(opt.sort_size);
+    }
+
+    #[test]
+    fn paths_only_lists_without_cleaning_and_conflicts_with_all() {
+        let opt = Opt::try_parse_from(["soji", "--paths-only"]).unwrap();
+        assert!(opt.paths_only);
+        assert!(!opt.all);
+        assert!(Opt::try_parse_from(["soji", "--paths-only", "--all"]).is_err());
     }
 
     #[test]
