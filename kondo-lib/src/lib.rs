@@ -38,6 +38,7 @@ const FILE_PROJECT_TURBOREPO_JSONC: &str = "turbo.jsonc";
 const FILE_PLATFORMIO_INI: &str = "platformio.ini";
 const FILE_PODFILE: &str = "Podfile";
 const FILE_DIRENV_ENVRC: &str = ".envrc";
+const FILE_KONDO_KEEP: &str = ".kondokeep";
 
 const PROJECT_CARGO_DIRS: [&str; 2] = ["target", ".xwin-cache"];
 const PROJECT_NODE_DIRS: [&str; 10] = [
@@ -352,6 +353,11 @@ impl Project {
             .sum()
     }
 
+    /// Returns whether this project contains a regular `.kondokeep` marker.
+    pub fn is_kept(&self) -> bool {
+        has_keep_marker(&self.path)
+    }
+
     pub fn last_modified(&self, options: &ScanOptions) -> Result<SystemTime, std::io::Error> {
         let top_level_modified = fs::metadata(&self.path)?.modified()?;
         let most_recent_modified = if options.no_ignore {
@@ -469,7 +475,7 @@ impl Project {
 
     /// Deletes the project's artifact directories and their contents
     pub fn clean(&self) {
-        if is_protected_application_support_path(&self.path) {
+        if is_protected_application_support_path(&self.path) || self.is_kept() {
             return;
         }
         for artifact_dir in self
@@ -513,6 +519,11 @@ pub fn print_elapsed(secs: u64) -> String {
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     entry.file_name().to_string_lossy().starts_with('.')
+}
+
+fn has_keep_marker(path: &Path) -> bool {
+    fs::symlink_metadata(path.join(FILE_KONDO_KEEP))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 fn is_under_user_application_support(path: &Path, home: &Path) -> bool {
@@ -666,6 +677,10 @@ impl Iterator for ProjectIter {
                 continue;
             }
             if is_protected_application_support_path(entry.path()) {
+                self.it.skip_current_dir();
+                continue;
+            }
+            if has_keep_marker(entry.path()) {
                 self.it.skip_current_dir();
                 continue;
             }
@@ -993,7 +1008,9 @@ pub fn pretty_size(size: u64) -> String {
 }
 
 pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
-    if is_protected_application_support_path(Path::new(project_path)) {
+    if is_protected_application_support_path(Path::new(project_path))
+        || has_keep_marker(Path::new(project_path))
+    {
         return Ok(());
     }
 
@@ -1392,6 +1409,80 @@ mod tests {
                 (ProjectType::Node, node_repo),
             ]
         );
+    }
+
+    #[test]
+    fn regular_kondokeep_marker_skips_projects_and_generic_artifacts() {
+        let project = Fixture::new();
+        fs::write(project.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(project.0.join(".kondokeep"), "keep this project\n").unwrap();
+        fs::create_dir_all(project.0.join("target/debug")).unwrap();
+        fs::write(project.0.join("target/debug/app"), b"build output").unwrap();
+
+        for no_ignore in [false, true] {
+            let mut options = scan_options(ProjectFilter::All, true);
+            options.no_ignore = no_ignore;
+            assert!(scan(&project.0, &options).next().is_none());
+        }
+
+        let project_value = Project {
+            project_type: ProjectType::Cargo,
+            path: project.0.clone(),
+        };
+        assert!(project_value.is_kept());
+        project_value.clean();
+        clean(project.0.to_str().unwrap()).unwrap();
+
+        assert!(project.0.join(".kondokeep").is_file());
+        assert!(project.0.join("target/debug/app").exists());
+
+        let generic = Fixture::new();
+        fs::write(generic.0.join(".kondokeep"), "keep generated folder\n").unwrap();
+        fs::create_dir_all(generic.0.join("target/debug")).unwrap();
+        assert!(scan(&generic.0, &scan_options(ProjectFilter::All, true))
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn nested_kondokeep_marker_stops_deep_scanning_at_that_directory() {
+        let fixture = Fixture::new();
+        let parent = fixture.0.join("parent");
+        let kept = parent.join("nested");
+        fs::create_dir_all(kept.join("target")).unwrap();
+        fs::write(parent.join("package.json"), "{}\n").unwrap();
+        fs::write(kept.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(kept.join(".kondokeep"), "keep nested project\n").unwrap();
+
+        let projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, true));
+        assert_eq!(projects, [(ProjectType::Node, parent)]);
+        assert!(kept.join("target").exists());
+    }
+
+    #[test]
+    fn directory_named_kondokeep_is_not_a_keep_marker() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join(".kondokeep")).unwrap();
+        fs::create_dir(fixture.0.join("target")).unwrap();
+
+        let projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, false));
+        assert_eq!(projects, [(ProjectType::Generic, fixture.0.clone())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_named_kondokeep_is_not_a_keep_marker() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let marker_target = fixture.0.join("marker contents");
+        fs::write(&marker_target, "not a marker\n").unwrap();
+        symlink(&marker_target, fixture.0.join(".kondokeep")).unwrap();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir(fixture.0.join("target")).unwrap();
+
+        let projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, false));
+        assert_eq!(projects, [(ProjectType::Cargo, fixture.0.clone())]);
     }
 
     #[test]

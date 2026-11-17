@@ -353,6 +353,9 @@ fn process_deletes(project_recv: Receiver<DeleteData>, force_rm: bool) -> Vec<(P
     project_recv
         .into_iter()
         .filter_map(|(project, artifact_bytes)| {
+            if project.is_kept() {
+                return None;
+            }
             let mut failed = false;
             for artifact_dir in project.artifact_dirs() {
                 let path = project.path.join(artifact_dir);
@@ -662,7 +665,7 @@ mod cli_tests {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::{discover, DiscoverData};
+    use super::{discover, process_deletes, DiscoverData};
     use kondo_lib::{scan, ProjectFilter, ScanOptions};
     use std::{
         fs,
@@ -777,5 +780,26 @@ mod discovery_tests {
                 fixture.0.join("alpha"),
             ]
         );
+    }
+
+    #[test]
+    fn trash_deletion_rechecks_kondokeep_before_removing_artifacts() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir_all(fixture.0.join("target/debug")).unwrap();
+        fs::write(fixture.0.join("target/debug/app"), b"build output").unwrap();
+
+        let found = discoveries(fixture.0.clone(), 0, false);
+        assert_eq!(found.len(), 1);
+        let project = found.into_iter().next().unwrap().0;
+        assert!(!project.is_kept());
+
+        fs::write(fixture.0.join(".kondokeep"), "keep this project\n").unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send((project, 12)).unwrap();
+        drop(sender);
+
+        assert!(process_deletes(receiver, true).is_empty());
+        assert!(fixture.0.join("target/debug/app").exists());
     }
 }
