@@ -1,9 +1,10 @@
 > [!IMPORTANT]
 > **This is basically upstream Kondo with these fork-specific features:**
 >
-> - Broader artifact detection, including generic generated folders and expanded language/framework build and cache directories.
-> - Deep scanning for nested projects and artifacts (`-D`, `--deep`), with an option to include ignored and hidden paths (`-i`, `--no-ignore`). The CLI command is `soji`.
-> - Artifacts go to the system Trash or Recycle Bin by default so you can review them later. Use `-f` or `--force-rm` for permanent removal.
+> - Broader artifact and project detection, including generic generated folders, expanded language/framework build and cache directories, uv and Python markers, `turbo.jsonc`, PlatformIO, direnv, and linked Git worktrees.
+> - Deep scanning for nested projects and artifacts (`-D`, `--deep`), including an option to scan ignored and hidden paths (`-i`, `--no-ignore`). The CLI command is `soji`.
+> - Project type filters (`--only`, `--skip`), minimum artifact size (`-m`, `--min-size`), largest-first sorting (`--sort-size`), and paths-only output (`--paths-only`).
+> - Preserve any project containing `.kondokeep`. Artifacts otherwise go to the system Trash or Recycle Bin so you can review them later; use `-f` or `--force-rm` for permanent removal.
 >
 > **New usage examples:**
 >
@@ -19,6 +20,8 @@
 >
 > # ⚠️ Clean all detected artifacts without confirmation and permanently delete them
 > soji --all --force-rm --no-ignore --deep <dir>
+> # Print artifact paths for scripts without cleaning them
+> soji --paths-only --no-ignore --deep <dir>
 > ```
 
 # Kondo 🧹
