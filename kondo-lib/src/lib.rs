@@ -1700,6 +1700,57 @@ mod tests {
     }
 
     #[test]
+    fn home_like_scan_needs_no_ignore_and_deep_for_hidden_cache_and_nested_project() {
+        let home = Fixture::new();
+        let cache = home.0.join(".cache");
+        fs::create_dir_all(cache.join("target")).unwrap();
+        let visible_project = home.0.join("projects");
+        fs::create_dir_all(&visible_project).unwrap();
+        fs::write(visible_project.join("package.json"), "{}\n").unwrap();
+        let nested_project = visible_project.join("app");
+        fs::create_dir_all(&nested_project).unwrap();
+        fs::write(nested_project.join("Cargo.toml"), "[package]\n").unwrap();
+
+        let defaults = scan_options(ProjectFilter::All, false);
+        assert_eq!(
+            scanned_projects(&home, &defaults),
+            [(ProjectType::Node, visible_project.clone())]
+        );
+
+        let deep_only = scan_options(ProjectFilter::All, true);
+        assert_eq!(
+            scanned_projects(&home, &deep_only),
+            [
+                (ProjectType::Node, visible_project.clone()),
+                (ProjectType::Cargo, nested_project.clone()),
+            ]
+        );
+
+        let mut no_ignore_only = scan_options(ProjectFilter::All, false);
+        no_ignore_only.no_ignore = true;
+        assert_eq!(
+            scanned_projects(&home, &no_ignore_only),
+            [
+                (ProjectType::Node, visible_project.clone()),
+                (ProjectType::Generic, home.0.clone()),
+            ]
+        );
+
+        let mut explicit_home_scan = scan_options(ProjectFilter::All, true);
+        explicit_home_scan.no_ignore = true;
+        let mut projects = scanned_projects(&home, &explicit_home_scan);
+        projects.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            projects,
+            [
+                (ProjectType::Generic, home.0.clone()),
+                (ProjectType::Node, visible_project),
+                (ProjectType::Cargo, nested_project),
+            ]
+        );
+    }
+
+    #[test]
     fn deep_scan_finds_allowed_nested_projects_inside_filtered_projects() {
         let fixture = Fixture::new();
         fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
