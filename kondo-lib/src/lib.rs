@@ -1361,6 +1361,40 @@ mod tests {
     }
 
     #[test]
+    fn deep_scan_finds_sibling_repositories_when_root_contains_a_python_script() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("maintenance.py"),
+            "print('workspace helper')\n",
+        )
+        .unwrap();
+
+        let cargo_repo = fixture.0.join("rust-tool");
+        fs::create_dir_all(&cargo_repo).unwrap();
+        fs::write(cargo_repo.join("Cargo.toml"), "[package]\n").unwrap();
+
+        let node_repo = fixture.0.join("web-tool");
+        fs::create_dir_all(&node_repo).unwrap();
+        fs::write(node_repo.join("package.json"), "{}\n").unwrap();
+
+        assert_eq!(
+            scanned_projects(&fixture, &scan_options(ProjectFilter::All, false)),
+            [(ProjectType::Python, fixture.0.clone())]
+        );
+
+        let mut deep_projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, true));
+        deep_projects.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            deep_projects,
+            [
+                (ProjectType::Python, fixture.0.clone()),
+                (ProjectType::Cargo, cargo_repo),
+                (ProjectType::Node, node_repo),
+            ]
+        );
+    }
+
+    #[test]
     fn direnv_cleanup_removes_only_project_local_cache_for_regular_envrc() {
         let fixture = Fixture::new();
         fs::write(fixture.0.join(".envrc"), "export FOO=bar\n").unwrap();
