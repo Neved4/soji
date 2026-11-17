@@ -18,7 +18,7 @@ use kondo_lib::{
 
 // Below needs updating every time a new project type is added!
 #[derive(Parser, Debug)]
-#[command(name = "kondo")]
+#[command(name = "kanso")]
 /// Kondo recursively cleans project directories.
 ///
 /// Supported project types: Cargo, Node, Unity, SBT, Haskell Stack, Maven, Unreal Engine, Jupyter Notebook, Python, Jupyter Notebooks, CMake, Composer, Pub, Elixir, Swift, Gradle, and .NET projects.
@@ -32,8 +32,15 @@ struct Opt {
     ignored_dirs: Vec<PathBuf>,
 
     /// Do not honor Git ignore files or skip hidden directories while scanning.
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     no_ignore: bool,
+
+    #[arg(
+        short = 'D',
+        long,
+        help = "Continue scanning inside projects to find nested projects and artifacts"
+    )]
+    deep: bool,
 
     /// Quiet mode. Won't output to the terminal. -qq prevents all output.
     #[arg(short, long, action = clap::ArgAction::Count, value_parser = clap::value_parser!(u8).range(0..3))]
@@ -234,12 +241,27 @@ fn discover(
     }
 }
 
-fn process_deletes(project_recv: Receiver<DeleteData>) -> Vec<(Project, u64)> {
+fn process_deletes(project_recv: Receiver<DeleteData>, force_rm: bool) -> Vec<(Project, u64)> {
     project_recv
         .into_iter()
-        .map(|(project, artifact_bytes)| {
-            project.clean();
-            (project, artifact_bytes)
+        .filter_map(|(project, artifact_bytes)| {
+            let mut failed = false;
+            for artifact_dir in project.artifact_dirs() {
+                let path = project.path.join(artifact_dir);
+                if !path.exists() {
+                    continue;
+                }
+                let result = if force_rm {
+                    fs::remove_dir_all(&path)
+                } else {
+                    trash::delete(&path).map_err(|error| std::io::Error::other(error.to_string()))
+                };
+                if let Err(error) = result {
+                    eprintln!("error removing artifact {path:?}: {error}");
+                    failed = true;
+                }
+            }
+            (!failed).then_some((project, artifact_bytes))
         })
         .collect()
 }

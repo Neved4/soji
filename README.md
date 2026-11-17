@@ -174,6 +174,14 @@ kondo -o3M # shorthand
 
 More options such as quiet mode, following symlinks, and filesystem restriction are viewable with `kondo --help`.
 
+The CLI moves artifacts to the system Trash or Recycle Bin by default. Use `--force-rm` (`-f`) to permanently remove them. Combine with `--all` (`-a`) to clean without a prompt; use `--dry-run` (`-n`) to preview first.
+
+```sh
+kanso --dry-run -i -D ~/Projects
+kanso -a -i -D ~/Projects
+kanso -a -f -i -D ~/Projects # permanently remove instead of using Trash
+```
+
 ## Building/Development
 
 To build the cli `kondo` you can run `cargo build` and `cargo run` from the projects root directory.
