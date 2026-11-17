@@ -20,6 +20,7 @@
 >
 > # ⚠️ Clean all detected artifacts without confirmation and permanently delete them
 > soji --all --force-rm --no-ignore --deep <dir>
+>
 > # Print artifact paths for scripts without cleaning them
 > soji --paths-only --no-ignore --deep <dir>
 > ```
