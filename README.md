@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > **This is basically upstream Kondo with these fork-specific features:**
 >
-> - Broader artifact and project detection, including generic generated folders, expanded language/framework build and cache directories, uv and Python markers, `turbo.jsonc`, PlatformIO, direnv, and linked Git worktrees.
+> - Broader artifact and project detection, including multiple project types in one directory, generic generated folders, expanded language/framework build and cache directories, uv and Python markers, `turbo.jsonc`, PlatformIO, direnv, and linked Git worktrees.
 > - Deep scanning for nested projects and artifacts (`-D`, `--deep`), including an option to scan ignored and hidden paths (`-i`, `--no-ignore`). The CLI command is `soji`.
 > - Project type filters (`--only`, `--skip`), minimum artifact size (`-m`, `--min-size`), largest-first sorting (`--sort-size`), and paths-only output (`--paths-only`).
 > - The GUI can filter projects by type. Releases include prebuilt CLI binaries and unsigned macOS GUI app bundles.
