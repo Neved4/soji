@@ -91,6 +91,10 @@ struct Opt {
     #[arg(short = 'm', long, value_parser = parse_size_filter, default_value = "0")]
     min_size: u64,
 
+    /// Show projects by total artifact size, largest first.
+    #[arg(long)]
+    sort_size: bool,
+
     /// Generates completions for the specified shell
     #[arg(long = "completions", value_enum)]
     generator: Option<Shell>,
@@ -261,10 +265,12 @@ fn discover(
     scan_options: &ScanOptions,
     project_min_age: u64,
     project_min_size: u64,
+    sort_size: bool,
     result_sender: SyncSender<DiscoverData>,
     ignored_dirs: &[PathBuf],
 ) {
     let mut discovered_paths = HashSet::new();
+    let mut sorted_projects = Vec::new();
     for project in dirs
         .iter()
         .flat_map(|dir| scan(dir, scan_options))
@@ -313,17 +319,32 @@ fn discover(
             continue;
         }
 
-        if result_sender
-            .send((
-                project,
-                artifact_dir_sizes,
-                project_artifact_bytes,
-                last_modified_str,
-            ))
-            .is_err()
-        {
+        let discovered = (
+            project,
+            artifact_dir_sizes,
+            project_artifact_bytes,
+            last_modified_str,
+        );
+        if sort_size {
+            sorted_projects.push(discovered);
+        } else if result_sender.send(discovered).is_err() {
             // interactive prompt has finished, silently finish here
             break;
+        }
+    }
+
+    if sort_size {
+        sorted_projects.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| left.0.path.cmp(&right.0.path))
+        });
+        for project in sorted_projects {
+            if result_sender.send(project).is_err() {
+                // interactive prompt has finished, silently finish here
+                break;
+            }
         }
     }
 }
@@ -492,6 +513,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let project_min_age = opt.older;
     let project_min_size = opt.min_size;
+    let sort_size = opt.sort_size;
     let ignored_dirs = {
         let cd = current_dir()?;
 
@@ -507,6 +529,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &scan_options,
             project_min_age,
             project_min_size,
+            sort_size,
             proj_discover_send,
             &ignored_dirs,
         );
@@ -599,6 +622,12 @@ mod cli_tests {
     }
 
     #[test]
+    fn sort_size_flag_is_parsed() {
+        let opt = Opt::try_parse_from(["soji", "--sort-size"]).unwrap();
+        assert!(opt.sort_size);
+    }
+
+    #[test]
     fn size_filter_parses_binary_units_and_rejects_invalid_or_overflowing_values() {
         assert_eq!(parse_size_filter("0").unwrap(), 0);
         assert_eq!(parse_size_filter("12B").unwrap(), 12);
@@ -634,7 +663,7 @@ mod cli_tests {
 #[cfg(test)]
 mod discovery_tests {
     use super::{discover, DiscoverData};
-    use kondo_lib::{ProjectFilter, ScanOptions};
+    use kondo_lib::{scan, ProjectFilter, ScanOptions};
     use std::{
         fs,
         path::PathBuf,
@@ -671,7 +700,7 @@ mod discovery_tests {
         }
     }
 
-    fn discoveries(root: PathBuf, min_size: u64) -> Vec<DiscoverData> {
+    fn discoveries(root: PathBuf, min_size: u64, sort_size: bool) -> Vec<DiscoverData> {
         let options = ScanOptions {
             follow_symlinks: false,
             same_file_system: false,
@@ -681,7 +710,7 @@ mod discovery_tests {
             project_filter: ProjectFilter::All,
         };
         let (sender, receiver) = sync_channel(5);
-        discover(vec![root], &options, 0, min_size, sender, &[]);
+        discover(vec![root], &options, 0, min_size, sort_size, sender, &[]);
         receiver.into_iter().collect()
     }
 
@@ -693,10 +722,60 @@ mod discovery_tests {
         fs::write(fixture.0.join("target/one.bin"), b"1234").unwrap();
         fs::write(fixture.0.join("target/two.bin"), b"12345678").unwrap();
 
-        assert!(discoveries(fixture.0.clone(), 13).is_empty());
-        let found = discoveries(fixture.0.clone(), 12);
+        assert!(discoveries(fixture.0.clone(), 13, false).is_empty());
+        let found = discoveries(fixture.0.clone(), 12, false);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].2, 12);
-        assert_eq!(discoveries(fixture.0.clone(), 11).len(), 1);
+        assert_eq!(discoveries(fixture.0.clone(), 11, false).len(), 1);
+    }
+
+    #[test]
+    fn sort_size_orders_largest_first_and_uses_path_for_ties() {
+        let fixture = Fixture::new();
+        for (name, bytes) in [("alpha", 3), ("beta", 10), ("gamma", 10), ("delta", 5)] {
+            let project = fixture.0.join(name);
+            fs::create_dir_all(project.join("target")).unwrap();
+            fs::write(project.join("Cargo.toml"), "[package]\n").unwrap();
+            fs::write(project.join("target/output.bin"), vec![b'x'; bytes]).unwrap();
+        }
+
+        let default_order = discoveries(fixture.0.clone(), 0, false)
+            .into_iter()
+            .map(|entry| entry.0.path)
+            .collect::<Vec<_>>();
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+            worktrees: false,
+            project_filter: ProjectFilter::All,
+        };
+        let scan_order = scan(&fixture.0, &options)
+            .map(|result| match result {
+                Ok(project) => project.path,
+                Err(_) => panic!("scan size-sort fixture without errors"),
+            })
+            .collect::<Vec<_>>();
+        let sorted = discoveries(fixture.0.clone(), 0, true);
+        let sorted_paths = sorted
+            .iter()
+            .map(|entry| entry.0.path.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(default_order, scan_order);
+        assert_eq!(
+            sorted.iter().map(|entry| entry.2).collect::<Vec<_>>(),
+            [10, 10, 5, 3]
+        );
+        assert_eq!(
+            sorted_paths,
+            [
+                fixture.0.join("beta"),
+                fixture.0.join("gamma"),
+                fixture.0.join("delta"),
+                fixture.0.join("alpha"),
+            ]
+        );
     }
 }
