@@ -10,6 +10,7 @@ use std::{
 const FILE_CARGO_TOML: &str = "Cargo.toml";
 const FILE_PACKAGE_JSON: &str = "package.json";
 const FILE_PYPROJECT_TOML: &str = "pyproject.toml";
+const FILE_UV_LOCK: &str = "uv.lock";
 const FILE_SETUP_PY: &str = "setup.py";
 const FILE_ASSEMBLY_CSHARP: &str = "Assembly-CSharp.csproj";
 const FILE_STACK_HASKELL: &str = "stack.yaml";
@@ -114,7 +115,7 @@ const PROJECT_UNREAL_DIRS: [&str; 5] = [
     "Intermediate",
 ];
 const PROJECT_JUPYTER_DIRS: [&str; 1] = [".ipynb_checkpoints"];
-const PROJECT_PYTHON_DIRS: [&str; 13] = [
+const PROJECT_PYTHON_DIRS: [&str; 12] = [
     ".mypy_cache",
     ".nox",
     ".pytest_cache",
@@ -122,7 +123,6 @@ const PROJECT_PYTHON_DIRS: [&str; 13] = [
     ".tox",
     "__pycache__",
     "__pypackages__",
-    ".venv",
     "venv",
     "build",
     "dist",
@@ -457,6 +457,14 @@ impl Iterator for ProjectIter {
                     .and_then(|path| self.project_artifacts.get(path))
                     .is_some_and(|dirs| dirs.iter().any(|dir| *dir == entry_name));
             let generic_artifact = GENERIC_ARTIFACT_DIRS.contains(&entry_name);
+            // A project virtual environment contains installed dependencies, not disposable
+            // Python caches. Keep it even though `.venv` is a generic artifact name elsewhere.
+            let project_venv = entry_name == ".venv"
+                && parent.is_some_and(|path| self.project_artifacts.contains_key(path));
+            if project_venv {
+                self.it.skip_current_dir();
+                continue;
+            }
             if entry.depth() > 0 && (project_artifact || generic_artifact) {
                 self.it.skip_current_dir();
                 if project_artifact {
@@ -494,6 +502,7 @@ impl Iterator for ProjectIter {
                 let p_type = match file_name {
                     FILE_CARGO_TOML => Some(ProjectType::Cargo),
                     FILE_PACKAGE_JSON => Some(ProjectType::Node),
+                    FILE_UV_LOCK => Some(ProjectType::Python),
                     FILE_PYPROJECT_TOML | FILE_SETUP_PY => Some(ProjectType::Python),
                     FILE_ASSEMBLY_CSHARP => Some(ProjectType::Unity),
                     FILE_STACK_HASKELL => Some(ProjectType::Stack),
@@ -671,6 +680,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
             let p_type = match file_name.as_str() {
                 FILE_CARGO_TOML => Some(ProjectType::Cargo),
                 FILE_PACKAGE_JSON => Some(ProjectType::Node),
+                FILE_PYPROJECT_TOML | FILE_UV_LOCK
+                    if dir_entry
+                        .file_type()
+                        .is_ok_and(|file_type| file_type.is_file()) =>
+                {
+                    Some(ProjectType::Python)
+                }
                 FILE_ASSEMBLY_CSHARP => Some(ProjectType::Unity),
                 FILE_STACK_HASKELL => Some(ProjectType::Stack),
                 FILE_CABAL_HASKELL => Some(ProjectType::Cabal),
@@ -726,7 +742,90 @@ pub fn path_canonicalise(
 
 #[cfg(test)]
 mod tests {
-    use super::print_elapsed;
+    use super::{clean, print_elapsed, scan, ScanOptions};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "soji-uv-test-{}-{timestamp}-{}",
+                std::process::id(),
+                NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn uv_lock_detects_python_project_without_root_python_file() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("uv.lock"), "version = 1\n").unwrap();
+        fs::create_dir(fixture.0.join("__pycache__")).unwrap();
+        fs::create_dir(fixture.0.join(".venv")).unwrap();
+        fs::write(fixture.0.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+        };
+        let projects = scan(&fixture.0, &options)
+            .map(|result| match result {
+                Ok(project) => project,
+                Err(_) => panic!("scan fixture without filesystem errors"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].type_name(), "Python");
+        assert_eq!(projects[0].path, fixture.0);
+        assert_eq!(projects[0].size(&options), 0);
+        projects[0].clean();
+        assert!(fixture.0.join(".venv/pyvenv.cfg").exists());
+    }
+
+    #[test]
+    fn direct_clean_accepts_regular_python_markers_but_not_marker_directories() {
+        for marker in ["uv.lock", "pyproject.toml"] {
+            let fixture = Fixture::new();
+            fs::write(fixture.0.join(marker), "").unwrap();
+            fs::create_dir(fixture.0.join("__pycache__")).unwrap();
+            fs::create_dir(fixture.0.join(".venv")).unwrap();
+            fs::write(fixture.0.join(".venv/pyvenv.cfg"), "").unwrap();
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(!fixture.0.join("__pycache__").exists());
+            assert!(fixture.0.join(".venv/pyvenv.cfg").exists());
+        }
+
+        for marker in ["uv.lock", "pyproject.toml"] {
+            let fixture = Fixture::new();
+            fs::create_dir(fixture.0.join(marker)).unwrap();
+            fs::create_dir(fixture.0.join("__pycache__")).unwrap();
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(fixture.0.join("__pycache__").exists());
+        }
+    }
 
     #[test]
     fn elapsed() {

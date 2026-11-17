@@ -197,6 +197,8 @@ soji -o3M # shorthand
 
 More options such as quiet mode, following symlinks, and filesystem restriction are viewable with `soji --help`.
 
+Python projects are detected by root-level `.py` files, `pyproject.toml`, or `uv.lock`. Soji cleans Python cache directories at the detected project root and preserves `.venv`.
+
 The CLI moves artifacts to the system Trash or Recycle Bin by default. Use `--force-rm` (`-f`) to permanently remove them. Combine with `--all` (`-a`) to clean without a prompt; use `--dry-run` (`-n`) to preview first.
 
 ```sh
