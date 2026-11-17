@@ -2,7 +2,7 @@
 > **This is basically upstream Kondo with these fork-specific features:**
 >
 > - Broader artifact detection, including generic generated folders and expanded language/framework build and cache directories.
-> - Deep scanning for nested projects and artifacts (`-D`), with an option to include ignored and hidden paths (`-i`). The CLI command is `kanso`.
+> - Deep scanning for nested projects and artifacts (`-D`), with an option to include ignored and hidden paths (`-i`). The CLI command is `soji`.
 > - Artifacts go to the system Trash or Recycle Bin by default; use `--force-rm` (`-f`) for permanent removal.
 
 # Kondo 🧹
@@ -110,13 +110,13 @@ pacman -S kondo
 Requires [Rust](https://www.rust-lang.org/tools/install).
 
 ```sh
-git clone https://github.com/tbillington/kondo.git
-cargo install --path kondo/kondo
+git clone https://github.com/Neved4/soji.git
+cargo install --path soji/kondo
 ```
 
 **Others**
 
-Binaries available on the [releases page](https://github.com/tbillington/kondo/releases).
+Binaries available on the [Soji releases page](https://github.com/Neved4/soji/releases).
 
 <a href="https://repology.org/project/kondo/versions">
     <img src="https://repology.org/badge/vertical-allrepos/kondo.svg" alt="Packaging status">
@@ -160,38 +160,38 @@ Binaries available on the [releases page](https://github.com/tbillington/kondo/r
 
 ### Command Line Interface
 
-Running `kondo` without a directory specified will run in the current directory.
+Running `soji` without a directory specified will run in the current directory.
 
 ```sh
-kondo
+soji
 ```
 
-Supplying a path will tell `kondo` where to start. Multiple paths are supported.
+Supplying a path will tell `soji` where to start. Multiple paths are supported.
 
 ```sh
-kondo code/my_project code/my_project_2
+soji code/my_project code/my_project_2
 ```
 
-Passing a time will filter projects to those that haven't been modified for at least the specified period. See `kondo --help` for the full list of options.
+Passing a time will filter projects to those that haven't been modified for at least the specified period. See `soji --help` for the full list of options.
 
 ```sh
-kondo --older 3M # only projects with last modified greater than 3 months
-kondo -o3M # shorthand
+soji --older 3M # only projects with last modified greater than 3 months
+soji -o3M # shorthand
 ```
 
-More options such as quiet mode, following symlinks, and filesystem restriction are viewable with `kondo --help`.
+More options such as quiet mode, following symlinks, and filesystem restriction are viewable with `soji --help`.
 
 The CLI moves artifacts to the system Trash or Recycle Bin by default. Use `--force-rm` (`-f`) to permanently remove them. Combine with `--all` (`-a`) to clean without a prompt; use `--dry-run` (`-n`) to preview first.
 
 ```sh
-kanso --dry-run -i -D ~/Projects
-kanso -a -i -D ~/Projects
-kanso -a -f -i -D ~/Projects # permanently remove instead of using Trash
+soji --dry-run -i -D ~/Projects
+soji -a -i -D ~/Projects
+soji -a -f -i -D ~/Projects # permanently remove instead of using Trash
 ```
 
 ## Building/Development
 
-To build the cli `kondo` you can run `cargo build` and `cargo run` from the projects root directory.
+To build the cli `soji` you can run `cargo build` and `cargo run` from the projects root directory.
 
 To build the gui `kondo-ui` you must first navigate into the `kondo-ui` directory, then you can run `cargo build` and `cargo run`.
 

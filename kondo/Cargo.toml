@@ -16,6 +16,11 @@ license = "MIT"
 keywords = ["clean", "cleanup", "delete", "free"]
 exclude = ["test_dir"]
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "soji"
+path = "src/main.rs"
 
 
 [dependencies]

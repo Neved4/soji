@@ -18,7 +18,7 @@ use kondo_lib::{
 
 // Below needs updating every time a new project type is added!
 #[derive(Parser, Debug)]
-#[command(name = "kanso")]
+#[command(name = "soji")]
 /// Kondo recursively cleans project directories.
 ///
 /// Supported project types: Cargo, Node, Unity, SBT, Haskell Stack, Maven, Unreal Engine, Jupyter Notebook, Python, Jupyter Notebooks, CMake, Composer, Pub, Elixir, Swift, Gradle, and .NET projects.
