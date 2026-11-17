@@ -12,6 +12,10 @@ const FILE_PACKAGE_JSON: &str = "package.json";
 const FILE_PYPROJECT_TOML: &str = "pyproject.toml";
 const FILE_UV_LOCK: &str = "uv.lock";
 const FILE_SETUP_PY: &str = "setup.py";
+const FILE_SETUP_CFG: &str = "setup.cfg";
+const FILE_REQUIREMENTS_TXT: &str = "requirements.txt";
+const FILE_TOX_INI: &str = "tox.ini";
+const FILE_NOXFILE_PY: &str = "noxfile.py";
 const FILE_ASSEMBLY_CSHARP: &str = "Assembly-CSharp.csproj";
 const FILE_STACK_HASKELL: &str = "stack.yaml";
 const FILE_CABAL_HASKELL: &str = "cabal.project";
@@ -829,7 +833,12 @@ impl Iterator for ProjectIter {
                     FILE_CARGO_TOML => Some(ProjectType::Cargo),
                     FILE_PACKAGE_JSON => Some(ProjectType::Node),
                     FILE_UV_LOCK => Some(ProjectType::Python),
-                    FILE_PYPROJECT_TOML | FILE_SETUP_PY => Some(ProjectType::Python),
+                    FILE_PYPROJECT_TOML
+                    | FILE_SETUP_PY
+                    | FILE_SETUP_CFG
+                    | FILE_REQUIREMENTS_TXT
+                    | FILE_TOX_INI
+                    | FILE_NOXFILE_PY => Some(ProjectType::Python),
                     FILE_ASSEMBLY_CSHARP => Some(ProjectType::Unity),
                     FILE_STACK_HASKELL => Some(ProjectType::Stack),
                     FILE_CABAL_HASKELL => Some(ProjectType::Cabal),
@@ -1082,7 +1091,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
             let p_type = match file_name.as_str() {
                 FILE_CARGO_TOML => Some(ProjectType::Cargo),
                 FILE_PACKAGE_JSON => Some(ProjectType::Node),
-                FILE_PYPROJECT_TOML | FILE_UV_LOCK
+                FILE_PYPROJECT_TOML
+                | FILE_UV_LOCK
+                | FILE_SETUP_PY
+                | FILE_SETUP_CFG
+                | FILE_REQUIREMENTS_TXT
+                | FILE_TOX_INI
+                | FILE_NOXFILE_PY
                     if dir_entry
                         .file_type()
                         .is_ok_and(|file_type| file_type.is_file()) =>
@@ -1315,7 +1330,16 @@ mod tests {
 
     #[test]
     fn direct_clean_accepts_regular_python_markers_but_not_marker_directories() {
-        for marker in ["uv.lock", "pyproject.toml"] {
+        let markers = [
+            "uv.lock",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+            "tox.ini",
+            "noxfile.py",
+        ];
+        for marker in markers {
             let fixture = Fixture::new();
             fs::write(fixture.0.join(marker), "").unwrap();
             fs::create_dir(fixture.0.join("__pycache__")).unwrap();
@@ -1326,12 +1350,74 @@ mod tests {
             assert!(fixture.0.join(".venv/pyvenv.cfg").exists());
         }
 
-        for marker in ["uv.lock", "pyproject.toml"] {
+        for marker in markers {
             let fixture = Fixture::new();
             fs::create_dir(fixture.0.join(marker)).unwrap();
             fs::create_dir(fixture.0.join("__pycache__")).unwrap();
             clean(fixture.0.to_str().unwrap()).unwrap();
             assert!(fixture.0.join("__pycache__").exists());
+        }
+    }
+
+    #[test]
+    fn standard_python_markers_detect_projects_and_clean_caches_safely() {
+        for marker in ["setup.cfg", "requirements.txt", "tox.ini", "noxfile.py"] {
+            let fixture = Fixture::new();
+            fs::write(fixture.0.join(marker), "# marker\n").unwrap();
+            fs::create_dir_all(fixture.0.join("src")).unwrap();
+            fs::write(fixture.0.join("src/main.py"), "print('source')\n").unwrap();
+            fs::create_dir_all(fixture.0.join("__pycache__")).unwrap();
+            fs::write(fixture.0.join("__pycache__/main.pyc"), b"bytecode").unwrap();
+            fs::create_dir_all(fixture.0.join(".venv/bin")).unwrap();
+            fs::write(fixture.0.join(".venv/pyvenv.cfg"), "home = python\n").unwrap();
+
+            let projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, false));
+            assert_eq!(projects, [(ProjectType::Python, fixture.0.clone())]);
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(!fixture.0.join("__pycache__").exists(), "{marker}");
+            assert!(fixture.0.join("src/main.py").is_file(), "{marker}");
+            assert!(fixture.0.join(marker).is_file(), "{marker}");
+            assert!(fixture.0.join(".venv/pyvenv.cfg").is_file(), "{marker}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_marker_symlinks_do_not_identify_projects_or_enable_direct_cleanup() {
+        use std::os::unix::fs::symlink;
+
+        for marker in ["setup.cfg", "requirements.txt", "tox.ini", "noxfile.py"] {
+            let fixture = Fixture::new();
+            let target = fixture.0.join("marker-target");
+            fs::write(&target, "marker\n").unwrap();
+            symlink(&target, fixture.0.join(marker)).unwrap();
+            fs::create_dir(fixture.0.join("__pycache__")).unwrap();
+
+            let projects = scanned_projects(
+                &fixture,
+                &scan_options(ProjectFilter::Only(vec![ProjectType::Python]), false),
+            );
+            assert!(projects.is_empty(), "{marker}");
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(fixture.0.join("__pycache__").is_dir(), "{marker}");
+            assert!(fixture.0.join(marker).exists(), "{marker}");
+        }
+    }
+
+    #[test]
+    fn python_marker_directories_do_not_identify_projects() {
+        for marker in ["setup.cfg", "requirements.txt", "tox.ini", "noxfile.py"] {
+            let fixture = Fixture::new();
+            fs::create_dir(fixture.0.join(marker)).unwrap();
+            fs::create_dir(fixture.0.join("__pycache__")).unwrap();
+
+            let projects = scanned_projects(
+                &fixture,
+                &scan_options(ProjectFilter::Only(vec![ProjectType::Python]), false),
+            );
+            assert!(projects.is_empty(), "{marker}");
+            clean(fixture.0.to_str().unwrap()).unwrap();
+            assert!(fixture.0.join("__pycache__").is_dir(), "{marker}");
         }
     }
 
