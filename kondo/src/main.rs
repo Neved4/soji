@@ -280,12 +280,7 @@ fn discover(
         .flat_map(|dir| scan(dir, scan_options))
         .filter_map(|p| p.ok())
         .filter(|p| ignored_dirs.iter().all(|i| !p.path.starts_with(i)))
-        .filter(|p| {
-            discovered_paths.insert((
-                p.path.clone(),
-                matches!(p.project_type, kondo_lib::ProjectType::Generic),
-            ))
-        })
+        .filter(|p| discovered_paths.insert((p.path.clone(), p.project_type)))
     {
         let artifact_dir_sizes: Vec<_> = project
             .artifact_paths()
@@ -804,6 +799,45 @@ mod discovery_tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].2, 12);
         assert_eq!(discoveries(fixture.0.clone(), 11, false).len(), 1);
+    }
+
+    #[test]
+    fn discover_reports_artifacts_for_each_project_type_at_a_shared_root() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
+        fs::create_dir_all(fixture.0.join("target/debug")).unwrap();
+        fs::write(fixture.0.join("target/debug/app"), b"rust build").unwrap();
+        fs::create_dir_all(fixture.0.join("node_modules/package")).unwrap();
+        fs::write(
+            fixture.0.join("node_modules/package/index.js"),
+            b"node package",
+        )
+        .unwrap();
+
+        let found = discoveries(fixture.0.clone(), 0, false);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0.project_type, kondo_lib::ProjectType::Cargo);
+        assert_eq!(
+            found[0]
+                .1
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["target"]
+        );
+        assert_eq!(found[1].0.project_type, kondo_lib::ProjectType::Node);
+        assert_eq!(
+            found[1]
+                .1
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["node_modules"]
+        );
+        assert!(found
+            .iter()
+            .all(|(project, _, _, _)| project.project_type != kondo_lib::ProjectType::Generic));
     }
 
     #[test]
