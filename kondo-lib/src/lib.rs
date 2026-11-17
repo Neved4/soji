@@ -1336,6 +1336,66 @@ mod tests {
     }
 
     #[test]
+    fn deep_scan_finds_nested_python_caches_and_cleanup_preserves_sources() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n",
+        )
+        .unwrap();
+
+        let modules = ["alpha", "beta"];
+        for module in modules {
+            let module_dir = fixture.0.join("src").join(module);
+            let cache_dir = module_dir.join("__pycache__");
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(module_dir.join(format!("{module}.py")), "print('source')\n").unwrap();
+            fs::write(
+                cache_dir.join(format!("{module}.cpython-312.pyc")),
+                b"bytecode",
+            )
+            .unwrap();
+        }
+
+        let default_projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, false));
+        assert_eq!(default_projects, [(ProjectType::Python, fixture.0.clone())]);
+
+        let mut deep_projects: Vec<Project> =
+            scan(&fixture.0, &scan_options(ProjectFilter::All, true))
+                .map(|result| match result {
+                    Ok(project) => project,
+                    Err(_) => panic!("scan fixture without filesystem errors"),
+                })
+                .collect();
+        deep_projects.sort_by(|left, right| left.path.cmp(&right.path));
+        let expected = [
+            (ProjectType::Python, fixture.0.clone()),
+            (ProjectType::Python, fixture.0.join("src/alpha")),
+            (ProjectType::Python, fixture.0.join("src/beta")),
+        ];
+        assert_eq!(
+            deep_projects
+                .iter()
+                .map(|project| (project.project_type, project.path.clone()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        for project in deep_projects.into_iter().skip(1) {
+            let project_path = project.path.clone();
+            assert!(project_path.join("__pycache__").is_dir());
+            project.clean();
+            assert!(!project_path.join("__pycache__").exists());
+            assert!(project_path
+                .join(format!(
+                    "{}.py",
+                    project_path.file_name().unwrap().to_string_lossy()
+                ))
+                .is_file());
+        }
+    }
+
+    #[test]
     fn unity_project_evidence_precedes_generic_csproj_detection() {
         let unity = Fixture::new();
         fs::write(unity.0.join("Mesh101.csproj"), "<Project />\n").unwrap();
