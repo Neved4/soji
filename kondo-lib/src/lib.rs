@@ -183,7 +183,7 @@ const PROJECT_PLATFORMIO_NAME: &str = "PlatformIO";
 const PROJECT_COCOAPODS_NAME: &str = "CocoaPods";
 const PROJECT_DIRENV_NAME: &str = "Direnv";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectType {
     Cargo,
     Node,
@@ -702,8 +702,9 @@ struct ProjectIter {
     root: path::PathBuf,
     root_device: Option<u64>,
     pending: VecDeque<path::PathBuf>,
+    pending_projects: VecDeque<Project>,
     queued: HashSet<path::PathBuf>,
-    emitted: HashSet<path::PathBuf>,
+    emitted: HashSet<(path::PathBuf, ProjectType)>,
     project_roots: HashSet<path::PathBuf>,
     project_artifact_paths: HashSet<path::PathBuf>,
     generic_roots: HashSet<path::PathBuf>,
@@ -719,6 +720,9 @@ impl Iterator for ProjectIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            if let Some(project) = self.pending_projects.pop_front() {
+                return Some(Ok(project));
+            }
             let entry: walkdir::DirEntry = match self.it.next() {
                 None => {
                     let next_root = self.pending.pop_front()?;
@@ -778,7 +782,7 @@ impl Iterator for ProjectIter {
                     if !self.project_filter.allows(ProjectType::Generic) {
                         continue;
                     }
-                    if self.worktrees && !self.first_emit(&project.path) {
+                    if self.worktrees && !self.first_emit(&project.path, ProjectType::Generic) {
                         continue;
                     }
                     return Some(Ok(project));
@@ -816,8 +820,8 @@ impl Iterator for ProjectIter {
                 self.it.skip_current_dir();
                 continue;
             }
+            let mut detected_types = Vec::new();
             let mut python_project = false;
-            let mut is_project = false;
             // intentionally ignoring errors while iterating the ReadDir
             // can't return them because we'll lose the context of where we are
             for dir_entry in entries
@@ -885,71 +889,63 @@ impl Iterator for ProjectIter {
                     _ => None,
                 };
                 if let Some(project_type) = p_type {
-                    is_project = true;
-                    let project = Project {
-                        project_type,
-                        path: entry.path().to_path_buf(),
-                    };
-                    self.project_roots.insert(path_key(&project.path));
+                    if !detected_types.contains(&project_type) {
+                        detected_types.push(project_type);
+                    }
+                }
+            }
+            // A loose Python script is a fallback marker; strong project manifests take
+            // precedence so scripts inside Cargo/.NET/etc. projects don't add a second type.
+            if python_project && detected_types.is_empty() {
+                detected_types.push(ProjectType::Python);
+            }
+            if !detected_types.is_empty() {
+                detected_types.sort_by_key(|project_type| {
+                    ProjectType::ALL
+                        .iter()
+                        .position(|candidate| candidate == project_type)
+                        .unwrap_or(usize::MAX)
+                });
+                let project_path = entry.path().to_path_buf();
+                let project_key = path_key(&project_path);
+                self.project_roots.insert(project_key);
+                let projects = detected_types.into_iter().map(|project_type| Project {
+                    project_type,
+                    path: project_path.clone(),
+                });
+                for project in projects {
                     self.project_artifact_paths.extend(
                         project
                             .artifact_paths()
                             .into_iter()
                             .map(|(_, path)| path_key(&path)),
                     );
-                    if !self.project_filter.allows(project_type) {
-                        continue;
+                    if self.project_filter.allows(project.project_type)
+                        && (!self.worktrees || self.first_emit(&project.path, project.project_type))
+                    {
+                        self.pending_projects.push_back(project);
                     }
-                    if !self.deep {
-                        self.it.skip_current_dir();
-                    }
-                    if self.worktrees && !self.first_emit(entry.path()) {
-                        break;
-                    }
-                    return Some(Ok(project));
-                }
-            }
-            if python_project {
-                let project = Project {
-                    project_type: ProjectType::Python,
-                    path: entry.path().to_path_buf(),
-                };
-                self.project_roots.insert(path_key(&project.path));
-                self.project_artifact_paths.extend(
-                    project
-                        .artifact_paths()
-                        .into_iter()
-                        .map(|(_, path)| path_key(&path)),
-                );
-                if !self.project_filter.allows(ProjectType::Python) {
-                    if !self.deep {
-                        self.it.skip_current_dir();
-                    }
-                    continue;
                 }
                 if !self.deep {
                     self.it.skip_current_dir();
                 }
-                if self.worktrees && !self.first_emit(entry.path()) {
-                    continue;
+                if let Some(project) = self.pending_projects.pop_front() {
+                    return Some(Ok(project));
                 }
-                return Some(Ok(project));
-            }
-            if is_project && !self.deep {
-                self.it.skip_current_dir();
+                continue;
             }
         }
     }
 }
 
 impl ProjectIter {
-    fn first_emit(&mut self, path: &Path) -> bool {
+    fn first_emit(&mut self, path: &Path, project_type: ProjectType) -> bool {
         let key = if self.follow_symlinks {
             fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
         } else {
             path.to_path_buf()
         };
-        self.emitted.insert(key)
+        self.emitted.insert((key, project_type))
     }
 }
 
@@ -1030,6 +1026,7 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
             None
         },
         pending: VecDeque::new(),
+        pending_projects: VecDeque::new(),
         queued: HashSet::from([root]),
         emitted: HashSet::new(),
         project_roots: HashSet::new(),
@@ -1660,6 +1657,15 @@ mod tests {
         fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
         fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
 
+        let all = scan_options(ProjectFilter::All, false);
+        assert_eq!(
+            scanned_projects(&fixture, &all),
+            [
+                (ProjectType::Cargo, fixture.0.clone()),
+                (ProjectType::Node, fixture.0.clone()),
+            ]
+        );
+
         let only_cargo = scan_options(ProjectFilter::Only(vec![ProjectType::Cargo]), false);
         assert_eq!(
             scanned_projects(&fixture, &only_cargo),
@@ -1670,6 +1676,26 @@ mod tests {
         assert_eq!(
             scanned_projects(&fixture, &skip_cargo),
             [(ProjectType::Node, fixture.0.clone())]
+        );
+    }
+
+    #[test]
+    fn mixed_project_types_keep_deep_nested_discovery_and_avoid_generic_duplicates() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(fixture.0.join("package.json"), "{}\n").unwrap();
+        fs::create_dir_all(fixture.0.join("node_modules/package")).unwrap();
+        let nested = fixture.0.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("Cargo.toml"), "[package]\n").unwrap();
+
+        assert_eq!(
+            scanned_projects(&fixture, &scan_options(ProjectFilter::All, true)),
+            [
+                (ProjectType::Cargo, fixture.0.clone()),
+                (ProjectType::Node, fixture.0.clone()),
+                (ProjectType::Cargo, nested),
+            ]
         );
     }
 
