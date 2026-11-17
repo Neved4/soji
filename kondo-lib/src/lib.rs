@@ -469,6 +469,9 @@ impl Project {
 
     /// Deletes the project's artifact directories and their contents
     pub fn clean(&self) {
+        if is_protected_application_support_path(&self.path) {
+            return;
+        }
         for artifact_dir in self
             .artifact_dirs()
             .iter()
@@ -510,6 +513,41 @@ pub fn print_elapsed(secs: u64) -> String {
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     entry.file_name().to_string_lossy().starts_with('.')
+}
+
+fn is_under_user_application_support(path: &Path, home: &Path) -> bool {
+    let protected_root = home.join("Library/Application Support");
+
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    if path.starts_with(&protected_root) {
+        return true;
+    }
+
+    let canonical_protected_root = fs::canonicalize(&protected_root).unwrap_or_else(|_| {
+        fs::canonicalize(home)
+            .unwrap_or_else(|_| home.to_path_buf())
+            .join("Library/Application Support")
+    });
+    fs::canonicalize(path)
+        .is_ok_and(|canonical_path| canonical_path.starts_with(canonical_protected_root))
+}
+
+#[cfg(target_os = "macos")]
+fn is_protected_application_support_path(path: &Path) -> bool {
+    std::env::var_os("HOME")
+        .is_some_and(|home| is_under_user_application_support(path, Path::new(&home)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_protected_application_support_path(_path: &Path) -> bool {
+    false
 }
 
 /// Resolve only consistent Git worktree registrations, refusing stale, locked, or
@@ -625,6 +663,10 @@ impl Iterator for ProjectIter {
                 Some(Ok(entry)) => entry,
             };
             if !entry.file_type().is_dir() {
+                continue;
+            }
+            if is_protected_application_support_path(entry.path()) {
+                self.it.skip_current_dir();
                 continue;
             }
             if !self.no_ignore && entry.depth() > 0 && is_hidden(&entry) {
@@ -951,6 +993,10 @@ pub fn pretty_size(size: u64) -> String {
 }
 
 pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
+    if is_protected_application_support_path(Path::new(project_path)) {
+        return Ok(());
+    }
+
     let project = fs::read_dir(project_path)?
         .filter_map(|rd| rd.ok())
         .find_map(|dir_entry| {
@@ -1047,7 +1093,10 @@ pub fn path_canonicalise(
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, print_elapsed, scan, ProjectFilter, ProjectType, ScanOptions};
+    use super::{
+        clean, is_under_user_application_support, print_elapsed, scan, Project, ProjectFilter,
+        ProjectType, ScanOptions,
+    };
     use std::{
         fs,
         path::PathBuf,
@@ -1343,6 +1392,80 @@ mod tests {
         clean(fixture.0.to_str().unwrap()).unwrap();
         assert!(!fixture.0.join(".direnv").exists());
         assert!(ProjectType::ALL.iter().any(|ty| ty.id() == "direnv"));
+    }
+
+    #[test]
+    fn application_support_guard_matches_only_the_users_protected_subtree() {
+        let fixture = Fixture::new();
+        let home = fixture.0.join("home");
+        let protected = home.join("Library/Application Support/Zed/languages/vtsls");
+        let sibling = home.join("Library/Preferences/Zed");
+        fs::create_dir_all(&protected).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+
+        assert!(is_under_user_application_support(&protected, &home));
+        assert!(is_under_user_application_support(
+            &protected.join("node_modules"),
+            &home
+        ));
+        assert!(!is_under_user_application_support(&sibling, &home));
+        assert!(!is_under_user_application_support(
+            &home.join("Projects/app"),
+            &home
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn application_support_roots_are_never_scanned_or_cleaned_even_with_no_ignore() {
+        use std::sync::Mutex;
+
+        static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+        struct HomeGuard(Option<std::ffi::OsString>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                if let Some(home) = self.0.take() {
+                    std::env::set_var("HOME", home);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let fixture = Fixture::new();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &fixture.0);
+        let _home_guard = HomeGuard(old_home);
+        let app_root = fixture
+            .0
+            .join("Library/Application Support/Zed/languages/vtsls");
+        fs::create_dir_all(app_root.join("node_modules/vtsls")).unwrap();
+        fs::write(app_root.join("package.json"), "{}\n").unwrap();
+        fs::write(app_root.join("node_modules/vtsls/server.js"), "bundled\n").unwrap();
+
+        for no_ignore in [false, true] {
+            let options = ScanOptions {
+                follow_symlinks: false,
+                same_file_system: false,
+                no_ignore,
+                deep: true,
+                worktrees: false,
+                project_filter: ProjectFilter::All,
+            };
+            assert!(scan(&app_root, &options).next().is_none());
+        }
+
+        let project = Project {
+            project_type: ProjectType::Node,
+            path: app_root.clone(),
+        };
+        project.clean();
+        clean(app_root.to_str().unwrap()).unwrap();
+
+        assert!(app_root.join("package.json").exists());
+        assert!(app_root.join("node_modules/vtsls/server.js").exists());
     }
 
     #[test]
