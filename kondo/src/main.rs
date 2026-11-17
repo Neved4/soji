@@ -390,16 +390,28 @@ fn remove_dir_all_with_retry(
     }
 }
 
-fn interactive_prompt(
-    projects_recv: Receiver<DiscoverData>,
-    deletes_send: Sender<DeleteData>,
+struct PromptOptions {
     quiet: u8,
-    mut clean_all: bool,
+    clean_all: bool,
     default: bool,
     dry_run: bool,
     single_key: bool,
     paths_only: bool,
+}
+
+fn interactive_prompt(
+    projects_recv: Receiver<DiscoverData>,
+    deletes_send: Sender<DeleteData>,
+    options: PromptOptions,
 ) -> (usize, u64) {
+    let PromptOptions {
+        quiet,
+        mut clean_all,
+        default,
+        dry_run,
+        single_key,
+        paths_only,
+    } = options;
     let mut total_projects = 0;
     let mut total_bytes = 0;
 
@@ -564,12 +576,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (total_projects, total_bytes) = interactive_prompt(
         proj_discover_recv,
         proj_delete_send,
-        opt.quiet,
-        opt.all,
-        opt.default,
-        opt.dry_run || opt.paths_only,
-        opt.single_key,
-        opt.paths_only,
+        PromptOptions {
+            quiet: opt.quiet,
+            clean_all: opt.all,
+            default: opt.default,
+            dry_run: opt.dry_run || opt.paths_only,
+            single_key: opt.single_key,
+            paths_only: opt.paths_only,
+        },
     );
 
     let delete_results = match delete_handle.join() {
