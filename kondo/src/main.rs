@@ -27,7 +27,7 @@ use kondo_lib::{
 ///
 /// Supported project types include Cargo, Node, Unity, Stack, Cabal, SBT, Maven, Gradle,
 /// CMake, Unreal, Jupyter, Python, Pixi, Composer, Pub, Elixir, Swift, Zig, Godot, .NET,
-/// Turborepo, Terraform, PlatformIO, CocoaPods, and generated artifacts.
+/// Turborepo, Terraform, PlatformIO, CocoaPods, Direnv, and generated artifacts.
 struct Opt {
     /// The directories to examine. Current directory will be used if DIRS is omitted.
     #[arg(name = "DIRS")]
@@ -594,6 +594,8 @@ mod cli_tests {
     #[test]
     fn project_type_filters_reject_unknown_ids() {
         assert!(Opt::try_parse_from(["soji", "--only", "not-a-project-type"]).is_err());
+        let direnv = Opt::try_parse_from(["soji", "--only", "direnv"]).unwrap();
+        assert_eq!(direnv.only, [ProjectType::Direnv]);
     }
 
     #[test]

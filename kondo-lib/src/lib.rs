@@ -37,6 +37,7 @@ const FILE_PROJECT_TURBOREPO: &str = "turbo.json";
 const FILE_PROJECT_TURBOREPO_JSONC: &str = "turbo.jsonc";
 const FILE_PLATFORMIO_INI: &str = "platformio.ini";
 const FILE_PODFILE: &str = "Podfile";
+const FILE_DIRENV_ENVRC: &str = ".envrc";
 
 const PROJECT_CARGO_DIRS: [&str; 2] = ["target", ".xwin-cache"];
 const PROJECT_NODE_DIRS: [&str; 10] = [
@@ -148,6 +149,7 @@ const PROJECT_TURBOREPO_DIRS: [&str; 1] = [".turbo"];
 const PROJECT_TERRAFORM_DIRS: [&str; 1] = [".terraform"];
 const PROJECT_PLATFORMIO_DIRS: [&str; 1] = [".pio"];
 const PROJECT_COCOAPODS_DIRS: [&str; 1] = ["Pods"];
+const PROJECT_DIRENV_DIRS: [&str; 1] = [".direnv"];
 
 const PROJECT_CARGO_NAME: &str = "Cargo";
 const PROJECT_NODE_NAME: &str = "Node";
@@ -174,6 +176,7 @@ const PROJECT_TURBOREPO_NAME: &str = "Turborepo";
 const PROJECT_TERRAFORM_NAME: &str = "Terraform";
 const PROJECT_PLATFORMIO_NAME: &str = "PlatformIO";
 const PROJECT_COCOAPODS_NAME: &str = "CocoaPods";
+const PROJECT_DIRENV_NAME: &str = "Direnv";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectType {
@@ -202,11 +205,12 @@ pub enum ProjectType {
     Terraform,
     PlatformIO,
     Cocoapods,
+    Direnv,
     Generic,
 }
 
 impl ProjectType {
-    pub const ALL: [ProjectType; 25] = [
+    pub const ALL: [ProjectType; 26] = [
         ProjectType::Cargo,
         ProjectType::Node,
         ProjectType::Unity,
@@ -231,6 +235,7 @@ impl ProjectType {
         ProjectType::Terraform,
         ProjectType::PlatformIO,
         ProjectType::Cocoapods,
+        ProjectType::Direnv,
         ProjectType::Generic,
     ];
 
@@ -260,6 +265,7 @@ impl ProjectType {
             ProjectType::Terraform => "terraform",
             ProjectType::PlatformIO => "platformio",
             ProjectType::Cocoapods => "cocoapods",
+            ProjectType::Direnv => "direnv",
             ProjectType::Generic => "generic",
         }
     }
@@ -329,6 +335,7 @@ impl Project {
             ProjectType::Terraform => &PROJECT_TERRAFORM_DIRS,
             ProjectType::PlatformIO => &PROJECT_PLATFORMIO_DIRS,
             ProjectType::Cocoapods => &PROJECT_COCOAPODS_DIRS,
+            ProjectType::Direnv => &PROJECT_DIRENV_DIRS,
             ProjectType::Generic => &GENERIC_ARTIFACT_DIRS,
         }
     }
@@ -455,6 +462,7 @@ impl Project {
             ProjectType::Terraform => PROJECT_TERRAFORM_NAME,
             ProjectType::PlatformIO => PROJECT_PLATFORMIO_NAME,
             ProjectType::Cocoapods => PROJECT_COCOAPODS_NAME,
+            ProjectType::Direnv => PROJECT_DIRENV_NAME,
             ProjectType::Generic => "Generated artifacts",
         }
     }
@@ -738,6 +746,7 @@ impl Iterator for ProjectIter {
                     FILE_TERRAFORM_HCL => Some(ProjectType::Terraform),
                     FILE_PLATFORMIO_INI => Some(ProjectType::PlatformIO),
                     FILE_PODFILE => Some(ProjectType::Cocoapods),
+                    FILE_DIRENV_ENVRC => Some(ProjectType::Direnv),
                     file_name if file_name.ends_with(FILE_UNREAL_SUFFIX) => {
                         Some(ProjectType::Unreal)
                     }
@@ -989,6 +998,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
                         .is_ok_and(|file_type| file_type.is_file()) =>
                 {
                     Some(ProjectType::PlatformIO)
+                }
+                FILE_DIRENV_ENVRC
+                    if dir_entry
+                        .file_type()
+                        .is_ok_and(|file_type| file_type.is_file()) =>
+                {
+                    Some(ProjectType::Direnv)
                 }
                 FILE_PODFILE => Some(ProjectType::Cocoapods),
                 _ => None,
@@ -1293,6 +1309,51 @@ mod tests {
             scanned_projects(&fixture, &scan_options(only_cargo, true)),
             [(ProjectType::Cargo, nested)]
         );
+    }
+
+    #[test]
+    fn direnv_cleanup_removes_only_project_local_cache_for_regular_envrc() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join(".envrc"), "export FOO=bar\n").unwrap();
+        fs::create_dir_all(fixture.0.join(".direnv/python-3.12/bin")).unwrap();
+        fs::write(fixture.0.join(".direnv/python-3.12/bin/python"), b"cache").unwrap();
+        fs::create_dir_all(fixture.0.join(".cache/direnv")).unwrap();
+        fs::write(fixture.0.join(".cache/direnv/cache"), b"global cache").unwrap();
+
+        let options = scan_options(ProjectFilter::All, false);
+        let project = match scan(&fixture.0, &options).next().unwrap() {
+            Ok(project) => project,
+            Err(_) => panic!("scan direnv fixture without filesystem errors"),
+        };
+        assert_eq!(project.type_name(), "Direnv");
+        assert_eq!(project.artifact_dirs(), &[".direnv"]);
+        project.clean();
+
+        assert!(!fixture.0.join(".direnv").exists());
+        assert_eq!(
+            fs::read(fixture.0.join(".envrc")).unwrap(),
+            b"export FOO=bar\n"
+        );
+        assert_eq!(
+            fs::read(fixture.0.join(".cache/direnv/cache")).unwrap(),
+            b"global cache"
+        );
+
+        fs::create_dir_all(fixture.0.join(".direnv")).unwrap();
+        clean(fixture.0.to_str().unwrap()).unwrap();
+        assert!(!fixture.0.join(".direnv").exists());
+        assert!(ProjectType::ALL.iter().any(|ty| ty.id() == "direnv"));
+    }
+
+    #[test]
+    fn direct_direnv_cleanup_ignores_directory_named_envrc() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join(".envrc")).unwrap();
+        fs::create_dir(fixture.0.join(".direnv")).unwrap();
+
+        clean(fixture.0.to_str().unwrap()).unwrap();
+
+        assert!(fixture.0.join(".direnv").exists());
     }
 
     #[test]
