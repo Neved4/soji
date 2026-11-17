@@ -35,6 +35,7 @@ const FILE_FSPROJ_SUFFIX: &str = ".fsproj";
 const FILE_TERRAFORM_HCL: &str = ".terraform.lock.hcl";
 const FILE_PROJECT_TURBOREPO: &str = "turbo.json";
 const FILE_PROJECT_TURBOREPO_JSONC: &str = "turbo.jsonc";
+const FILE_PLATFORMIO_INI: &str = "platformio.ini";
 const FILE_PODFILE: &str = "Podfile";
 
 const PROJECT_CARGO_DIRS: [&str; 2] = ["target", ".xwin-cache"];
@@ -145,6 +146,7 @@ const PROJECT_GODOT_4_DIRS: [&str; 1] = [".godot"];
 const PROJECT_DOTNET_DIRS: [&str; 2] = ["bin", "obj"];
 const PROJECT_TURBOREPO_DIRS: [&str; 1] = [".turbo"];
 const PROJECT_TERRAFORM_DIRS: [&str; 1] = [".terraform"];
+const PROJECT_PLATFORMIO_DIRS: [&str; 1] = [".pio"];
 const PROJECT_COCOAPODS_DIRS: [&str; 1] = ["Pods"];
 
 const PROJECT_CARGO_NAME: &str = "Cargo";
@@ -170,6 +172,7 @@ const PROJECT_GODOT_4_NAME: &str = "Godot 4.x";
 const PROJECT_DOTNET_NAME: &str = ".NET";
 const PROJECT_TURBOREPO_NAME: &str = "Turborepo";
 const PROJECT_TERRAFORM_NAME: &str = "Terraform";
+const PROJECT_PLATFORMIO_NAME: &str = "PlatformIO";
 const PROJECT_COCOAPODS_NAME: &str = "CocoaPods";
 
 #[derive(Debug, Clone)]
@@ -197,6 +200,7 @@ pub enum ProjectType {
     Dotnet,
     Turborepo,
     Terraform,
+    PlatformIO,
     Cocoapods,
     Generic,
 }
@@ -245,6 +249,7 @@ impl Project {
             ProjectType::Dotnet => &PROJECT_DOTNET_DIRS,
             ProjectType::Turborepo => &PROJECT_TURBOREPO_DIRS,
             ProjectType::Terraform => &PROJECT_TERRAFORM_DIRS,
+            ProjectType::PlatformIO => &PROJECT_PLATFORMIO_DIRS,
             ProjectType::Cocoapods => &PROJECT_COCOAPODS_DIRS,
             ProjectType::Generic => &GENERIC_ARTIFACT_DIRS,
         }
@@ -370,6 +375,7 @@ impl Project {
             ProjectType::Dotnet => PROJECT_DOTNET_NAME,
             ProjectType::Turborepo => PROJECT_TURBOREPO_NAME,
             ProjectType::Terraform => PROJECT_TERRAFORM_NAME,
+            ProjectType::PlatformIO => PROJECT_PLATFORMIO_NAME,
             ProjectType::Cocoapods => PROJECT_COCOAPODS_NAME,
             ProjectType::Generic => "Generated artifacts",
         }
@@ -510,7 +516,13 @@ impl Iterator for ProjectIter {
                     FILE_CABAL_HASKELL => Some(ProjectType::Cabal),
                     FILE_SBT_BUILD => Some(ProjectType::SBT),
                     FILE_MVN_BUILD => Some(ProjectType::Maven),
-                    FILE_CMAKE_BUILD => Some(ProjectType::CMake),
+                    FILE_CMAKE_BUILD => {
+                        if dir_contains_file(entry.path(), FILE_PLATFORMIO_INI) {
+                            Some(ProjectType::PlatformIO)
+                        } else {
+                            Some(ProjectType::CMake)
+                        }
+                    }
                     FILE_COMPOSER_JSON => Some(ProjectType::Composer),
                     FILE_PUBSPEC_YAML => Some(ProjectType::Pub),
                     FILE_PIXI_PACKAGE => Some(ProjectType::Pixi),
@@ -523,6 +535,7 @@ impl Iterator for ProjectIter {
                     FILE_PROJECT_TURBOREPO => Some(ProjectType::Turborepo),
                     FILE_PROJECT_TURBOREPO_JSONC => Some(ProjectType::Turborepo),
                     FILE_TERRAFORM_HCL => Some(ProjectType::Terraform),
+                    FILE_PLATFORMIO_INI => Some(ProjectType::PlatformIO),
                     FILE_PODFILE => Some(ProjectType::Cocoapods),
                     file_name if file_name.ends_with(FILE_UNREAL_SUFFIX) => {
                         Some(ProjectType::Unreal)
@@ -694,7 +707,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
                 FILE_CABAL_HASKELL => Some(ProjectType::Cabal),
                 FILE_SBT_BUILD => Some(ProjectType::SBT),
                 FILE_MVN_BUILD => Some(ProjectType::Maven),
-                FILE_CMAKE_BUILD => Some(ProjectType::CMake),
+                FILE_CMAKE_BUILD => {
+                    if dir_contains_file(path::Path::new(project_path), FILE_PLATFORMIO_INI) {
+                        Some(ProjectType::PlatformIO)
+                    } else {
+                        Some(ProjectType::CMake)
+                    }
+                }
                 FILE_COMPOSER_JSON => Some(ProjectType::Composer),
                 FILE_PUBSPEC_YAML => Some(ProjectType::Pub),
                 FILE_PIXI_PACKAGE => Some(ProjectType::Pixi),
@@ -710,6 +729,13 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
                     Some(ProjectType::Turborepo)
                 }
                 FILE_TERRAFORM_HCL => Some(ProjectType::Terraform),
+                FILE_PLATFORMIO_INI
+                    if dir_entry
+                        .file_type()
+                        .is_ok_and(|file_type| file_type.is_file()) =>
+                {
+                    Some(ProjectType::PlatformIO)
+                }
                 FILE_PODFILE => Some(ProjectType::Cocoapods),
                 _ => None,
             };
@@ -873,6 +899,55 @@ mod tests {
         fs::create_dir(fixture.0.join(".turbo")).unwrap();
         clean(fixture.0.to_str().unwrap()).unwrap();
         assert!(fixture.0.join(".turbo").exists());
+    }
+
+    #[test]
+    fn platformio_detection_precedes_cmake_and_cleans_only_project_cache() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("platformio.ini"), "[env:test]\n").unwrap();
+        fs::write(fixture.0.join("CMakeLists.txt"), "project(test)\n").unwrap();
+        fs::create_dir_all(fixture.0.join(".pio/build/test")).unwrap();
+        fs::write(fixture.0.join(".pio/build/test/firmware.bin"), b"firmware").unwrap();
+        fs::create_dir_all(fixture.0.join(".platformio/packages/toolchain")).unwrap();
+        fs::write(
+            fixture.0.join(".platformio/packages/toolchain/keep.txt"),
+            b"keep",
+        )
+        .unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+        };
+        let projects = scan(&fixture.0, &options)
+            .map(|result| match result {
+                Ok(project) => project,
+                Err(_) => panic!("scan fixture without filesystem errors"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].type_name(), "PlatformIO");
+        assert_eq!(projects[0].artifact_dirs(), &[".pio"]);
+
+        projects[0].clean();
+        assert!(!fixture.0.join(".pio").exists());
+        assert!(fixture
+            .0
+            .join(".platformio/packages/toolchain/keep.txt")
+            .exists());
+    }
+
+    #[test]
+    fn direct_clean_requires_regular_platformio_marker() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join("platformio.ini")).unwrap();
+        fs::create_dir(fixture.0.join(".pio")).unwrap();
+
+        clean(fixture.0.to_str().unwrap()).unwrap();
+
+        assert!(fixture.0.join(".pio").exists());
     }
 
     #[test]
