@@ -2214,5 +2214,8 @@ mod tests {
         assert_eq!(print_elapsed(2419200 * 12), "12 months ago");
         assert_eq!(print_elapsed(2419200 * 25), "25 months ago");
         assert_eq!(print_elapsed(2419200 * 48), "4 years ago");
+        // An mtime around January 2018 is about 8 years and 10 months old
+        // in November 2026, and should be reported as 9 years, not 72.
+        assert_eq!(print_elapsed(278_553_600), "9 years ago");
     }
 }
