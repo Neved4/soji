@@ -1605,6 +1605,39 @@ mod tests {
     }
 
     #[test]
+    fn deep_scan_finds_nested_cargo_and_node_projects_beneath_python_scripts() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("run.py"), "print('test runner')\n").unwrap();
+
+        let api = fixture.0.join("api");
+        fs::create_dir_all(api.join("target/debug")).unwrap();
+        fs::write(api.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(api.join("test.py"), "print('api test')\n").unwrap();
+        fs::write(api.join("target/debug/app"), b"build output").unwrap();
+
+        let web = fixture.0.join("web");
+        fs::create_dir_all(web.join("node_modules/package")).unwrap();
+        fs::write(web.join("package.json"), "{}\n").unwrap();
+        fs::write(web.join("node_modules/package/index.js"), b"dependency").unwrap();
+
+        assert_eq!(
+            scanned_projects(&fixture, &scan_options(ProjectFilter::All, false)),
+            [(ProjectType::Python, fixture.0.clone())]
+        );
+
+        let mut deep_projects = scanned_projects(&fixture, &scan_options(ProjectFilter::All, true));
+        deep_projects.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            deep_projects,
+            [
+                (ProjectType::Python, fixture.0.clone()),
+                (ProjectType::Cargo, api),
+                (ProjectType::Node, web),
+            ]
+        );
+    }
+
+    #[test]
     fn regular_kondokeep_marker_skips_projects_and_generic_artifacts() {
         let project = Fixture::new();
         fs::write(project.0.join("Cargo.toml"), "[package]\n").unwrap();
