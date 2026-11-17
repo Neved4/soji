@@ -87,6 +87,10 @@ struct Opt {
     #[arg(short, long, value_parser = parse_age_filter, default_value = "0d")]
     older: u64,
 
+    /// Only include projects whose detected artifacts total at least SIZE (for example 200MB or 1GiB; units use powers of 1024).
+    #[arg(short = 'm', long, value_parser = parse_size_filter, default_value = "0")]
+    min_size: u64,
+
     /// Generates completions for the specified shell
     #[arg(long = "completions", value_enum)]
     generator: Option<Shell>,
@@ -198,6 +202,57 @@ pub fn parse_age_filter(age_filter: &str) -> Result<u64, ParseAgeFilterError> {
     Ok(seconds)
 }
 
+#[derive(Debug)]
+pub enum ParseSizeFilterError {
+    ParseIntError(ParseIntError),
+    InvalidUnit,
+    Overflow,
+}
+
+impl fmt::Display for ParseSizeFilterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseSizeFilterError::ParseIntError(error) => error.fmt(f),
+            ParseSizeFilterError::InvalidUnit => {
+                "invalid size unit; use bytes, K/KB/KiB, M/MB/MiB, or G/GB/GiB".fmt(f)
+            }
+            ParseSizeFilterError::Overflow => "size is too large".fmt(f),
+        }
+    }
+}
+
+impl From<ParseIntError> for ParseSizeFilterError {
+    fn from(error: ParseIntError) -> Self {
+        Self::ParseIntError(error)
+    }
+}
+
+impl Error for ParseSizeFilterError {}
+
+pub fn parse_size_filter(size: &str) -> Result<u64, ParseSizeFilterError> {
+    const KIBIBYTE: u64 = 1024;
+    const MEBIBYTE: u64 = KIBIBYTE * 1024;
+    const GIBIBYTE: u64 = MEBIBYTE * 1024;
+
+    let unit_start = size
+        .char_indices()
+        .find_map(|(index, character)| (!character.is_ascii_digit()).then_some(index))
+        .unwrap_or(size.len());
+    let (number, unit) = size.split_at(unit_start);
+    let count = number.parse::<u64>()?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => KIBIBYTE,
+        "m" | "mb" | "mib" => MEBIBYTE,
+        "g" | "gb" | "gib" => GIBIBYTE,
+        _ => return Err(ParseSizeFilterError::InvalidUnit),
+    };
+
+    count
+        .checked_mul(multiplier)
+        .ok_or(ParseSizeFilterError::Overflow)
+}
+
 type DiscoverData = (Project, Vec<(String, u64)>, u64, String);
 type DeleteData = (Project, u64);
 
@@ -205,6 +260,7 @@ fn discover(
     dirs: Vec<PathBuf>,
     scan_options: &ScanOptions,
     project_min_age: u64,
+    project_min_size: u64,
     result_sender: SyncSender<DiscoverData>,
     ignored_dirs: &[PathBuf],
 ) {
@@ -235,6 +291,10 @@ fn discover(
         let project_artifact_bytes = artifact_dir_sizes.iter().map(|(_, bytes)| bytes).sum();
 
         if project_artifact_bytes == 0 {
+            continue;
+        }
+
+        if project_artifact_bytes < project_min_size {
             continue;
         }
 
@@ -431,6 +491,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (proj_delete_send, proj_delete_recv) = std::sync::mpsc::channel::<(Project, u64)>();
 
     let project_min_age = opt.older;
+    let project_min_size = opt.min_size;
     let ignored_dirs = {
         let cd = current_dir()?;
 
@@ -445,6 +506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             dirs,
             &scan_options,
             project_min_age,
+            project_min_size,
             proj_discover_send,
             &ignored_dirs,
         );
@@ -489,7 +551,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{Opt, ProjectType};
+    use super::{parse_size_filter, Opt, ParseSizeFilterError, ProjectType};
     use clap::Parser;
 
     #[test]
@@ -532,5 +594,107 @@ mod cli_tests {
     #[test]
     fn project_type_filters_reject_unknown_ids() {
         assert!(Opt::try_parse_from(["soji", "--only", "not-a-project-type"]).is_err());
+    }
+
+    #[test]
+    fn size_filter_parses_binary_units_and_rejects_invalid_or_overflowing_values() {
+        assert_eq!(parse_size_filter("0").unwrap(), 0);
+        assert_eq!(parse_size_filter("12B").unwrap(), 12);
+        assert_eq!(parse_size_filter("1k").unwrap(), 1024);
+        assert_eq!(parse_size_filter("1KB").unwrap(), 1024);
+        assert_eq!(parse_size_filter("1KiB").unwrap(), 1024);
+        assert_eq!(parse_size_filter("1MB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_filter("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_filter("1GB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_filter("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert!(matches!(
+            parse_size_filter("1.5GB"),
+            Err(ParseSizeFilterError::InvalidUnit)
+        ));
+        assert!(matches!(
+            parse_size_filter(""),
+            Err(ParseSizeFilterError::ParseIntError(_))
+        ));
+        assert!(matches!(
+            parse_size_filter("1XB"),
+            Err(ParseSizeFilterError::InvalidUnit)
+        ));
+        assert!(matches!(
+            parse_size_filter("18446744073709551615GB"),
+            Err(ParseSizeFilterError::Overflow)
+        ));
+
+        let opt = Opt::try_parse_from(["soji", "--min-size", "1MiB"]).unwrap();
+        assert_eq!(opt.min_size, 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{discover, DiscoverData};
+    use kondo_lib::{ProjectFilter, ScanOptions};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc::sync_channel,
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "soji-min-size-{}-{timestamp}-{}",
+                std::process::id(),
+                NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create min-size test fixture");
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn discoveries(root: PathBuf, min_size: u64) -> Vec<DiscoverData> {
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+            worktrees: false,
+            project_filter: ProjectFilter::All,
+        };
+        let (sender, receiver) = sync_channel(5);
+        discover(vec![root], &options, 0, min_size, sender, &[]);
+        receiver.into_iter().collect()
+    }
+
+    #[test]
+    fn min_size_filters_by_total_artifact_bytes_before_reporting() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir_all(fixture.0.join("target")).unwrap();
+        fs::write(fixture.0.join("target/one.bin"), b"1234").unwrap();
+        fs::write(fixture.0.join("target/two.bin"), b"12345678").unwrap();
+
+        assert!(discoveries(fixture.0.clone(), 13).is_empty());
+        let found = discoveries(fixture.0.clone(), 12);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].2, 12);
+        assert_eq!(discoveries(fixture.0.clone(), 11).len(), 1);
     }
 }
