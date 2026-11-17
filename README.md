@@ -3,7 +3,16 @@
 >
 > - Broader artifact detection, including generic generated folders and expanded language/framework build and cache directories.
 > - Deep scanning for nested projects and artifacts (`-D`), with an option to include ignored and hidden paths (`-i`). The CLI command is `soji`.
-> - Artifacts go to the system Trash or Recycle Bin by default; use `--force-rm` (`-f`) for permanent removal.
+> - Artifacts go to the system Trash or Recycle Bin by default so you can review them later. Use `--force-rm` (`-f`) for permanent removal.
+>
+> **New usage examples:**
+>
+> ```sh
+> soji -Din <dir> # List everything detected and show the total potential savings
+> soji -Di <dir> # Review each result and answer yes or no
+> ```
+>
+> ⚠️ `-a` cleans all detected artifacts automatically without confirmation. Add `-f` to permanently delete them instead of moving them to the Trash.
 
 # Kondo 🧹
 
