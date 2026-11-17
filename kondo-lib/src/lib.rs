@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     error::{self, Error},
     fs,
     path::{self, Path},
@@ -341,15 +341,51 @@ impl Project {
         }
     }
 
+    /// Returns artifact labels and their absolute paths. CMake projects also include
+    /// direct child build directories with both `CMakeCache.txt` and `CMakeFiles/`.
+    pub fn artifact_paths(&self) -> Vec<(String, path::PathBuf)> {
+        let root = absolute_path(&self.path);
+        let mut artifacts: Vec<_> = self
+            .artifact_dirs()
+            .iter()
+            .map(|directory| (directory.to_string(), root.join(directory)))
+            .collect();
+
+        if matches!(self.project_type, ProjectType::CMake) {
+            if let Ok(entries) = fs::read_dir(&root) {
+                for entry in entries.filter_map(Result::ok) {
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let build_dir = entry.path();
+                    let has_cache = fs::symlink_metadata(build_dir.join("CMakeCache.txt"))
+                        .is_ok_and(|metadata| metadata.file_type().is_file());
+                    let has_cmake_files = fs::symlink_metadata(build_dir.join("CMakeFiles"))
+                        .is_ok_and(|metadata| metadata.file_type().is_dir());
+                    if has_cache && has_cmake_files {
+                        let label = entry.file_name().to_string_lossy().into_owned();
+                        artifacts.push((label, build_dir));
+                    }
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        artifacts.retain(|(_, artifact_path)| seen.insert(path_key(artifact_path)));
+        artifacts
+    }
+
     pub fn name(&self) -> Cow<'_, str> {
         self.path.to_string_lossy()
     }
 
     pub fn size(&self, options: &ScanOptions) -> u64 {
-        self.artifact_dirs()
-            .iter()
-            .copied()
-            .map(|p| dir_size(&self.path.join(p), options))
+        self.artifact_paths()
+            .into_iter()
+            .map(|(_, path)| dir_size(&path, options))
             .sum()
     }
 
@@ -400,6 +436,12 @@ impl Project {
             Ok(rd) => rd,
         };
 
+        let artifact_paths: HashSet<_> = self
+            .artifact_paths()
+            .into_iter()
+            .map(|(_, path)| path_key(&path))
+            .collect();
+
         for entry in project_root.filter_map(|rd| rd.ok()) {
             let file_type = match entry.file_type() {
                 Err(_) => continue,
@@ -419,7 +461,7 @@ impl Project {
                     Ok(file_name) => file_name,
                 };
                 let size = dir_size(&entry.path(), options);
-                let artifact_dir = self.artifact_dirs().contains(&file_name.as_str());
+                let artifact_dir = artifact_paths.contains(&path_key(&entry.path()));
                 if artifact_dir {
                     artifact_size += size;
                 } else {
@@ -478,12 +520,10 @@ impl Project {
         if is_protected_application_support_path(&self.path) || self.is_kept() {
             return;
         }
-        for artifact_dir in self
-            .artifact_dirs()
-            .iter()
-            .copied()
-            .map(|ad| self.path.join(ad))
-            .filter(|ad| ad.exists())
+        for (_, artifact_dir) in self
+            .artifact_paths()
+            .into_iter()
+            .filter(|(_, path)| path.exists())
         {
             if let Err(e) = fs::remove_dir_all(&artifact_dir) {
                 eprintln!("error removing directory {:?}: {:?}", artifact_dir, e);
@@ -632,6 +672,20 @@ fn device(_path: &Path) -> Option<u64> {
     None
 }
 
+fn absolute_path(path: &Path) -> path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn path_key(path: &Path) -> path::PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| absolute_path(path))
+}
+
 struct ProjectIter {
     it: walkdir::IntoIter,
     project_filter: ProjectFilter,
@@ -646,7 +700,7 @@ struct ProjectIter {
     pending: VecDeque<path::PathBuf>,
     queued: HashSet<path::PathBuf>,
     emitted: HashSet<path::PathBuf>,
-    project_artifacts: HashMap<path::PathBuf, Vec<&'static str>>,
+    project_roots: HashSet<path::PathBuf>,
     project_artifact_paths: HashSet<path::PathBuf>,
     generic_roots: HashSet<path::PathBuf>,
 }
@@ -690,15 +744,14 @@ impl Iterator for ProjectIter {
             }
             let entry_name = entry.file_name().to_str().unwrap_or_default();
             let parent = entry.path().parent();
-            let project_artifact = self.project_artifact_paths.contains(entry.path())
-                || parent
-                    .and_then(|path| self.project_artifacts.get(path))
-                    .is_some_and(|dirs| dirs.contains(&entry_name));
+            let project_artifact = self
+                .project_artifact_paths
+                .contains(&path_key(entry.path()));
             let generic_artifact = GENERIC_ARTIFACT_DIRS.contains(&entry_name);
             // A project virtual environment contains installed dependencies, not disposable
             // Python caches. Keep it even though `.venv` is a generic artifact name elsewhere.
             let project_venv = entry_name == ".venv"
-                && parent.is_some_and(|path| self.project_artifacts.contains_key(path));
+                && parent.is_some_and(|path| self.project_roots.contains(&path_key(path)));
             if project_venv {
                 self.it.skip_current_dir();
                 continue;
@@ -709,7 +762,7 @@ impl Iterator for ProjectIter {
                     continue;
                 }
                 if let Some(parent) = parent {
-                    if self.project_artifacts.contains_key(parent)
+                    if self.project_roots.contains(&path_key(parent))
                         || !self.generic_roots.insert(parent.to_path_buf())
                     {
                         continue;
@@ -828,13 +881,12 @@ impl Iterator for ProjectIter {
                         project_type,
                         path: entry.path().to_path_buf(),
                     };
-                    self.project_artifacts
-                        .insert(project.path.clone(), project.artifact_dirs().to_vec());
+                    self.project_roots.insert(path_key(&project.path));
                     self.project_artifact_paths.extend(
                         project
-                            .artifact_dirs()
-                            .iter()
-                            .map(|dir| project.path.join(dir)),
+                            .artifact_paths()
+                            .into_iter()
+                            .map(|(_, path)| path_key(&path)),
                     );
                     if !self.project_filter.allows(project_type) {
                         continue;
@@ -853,13 +905,12 @@ impl Iterator for ProjectIter {
                     project_type: ProjectType::Python,
                     path: entry.path().to_path_buf(),
                 };
-                self.project_artifacts
-                    .insert(project.path.clone(), project.artifact_dirs().to_vec());
+                self.project_roots.insert(path_key(&project.path));
                 self.project_artifact_paths.extend(
                     project
-                        .artifact_dirs()
-                        .iter()
-                        .map(|dir| project.path.join(dir)),
+                        .artifact_paths()
+                        .into_iter()
+                        .map(|(_, path)| path_key(&path)),
                 );
                 if !self.project_filter.allows(ProjectType::Python) {
                     if !self.deep {
@@ -972,7 +1023,7 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
         pending: VecDeque::new(),
         queued: HashSet::from([root]),
         emitted: HashSet::new(),
-        project_artifacts: HashMap::new(),
+        project_roots: HashSet::new(),
         project_artifact_paths: HashSet::new(),
         generic_roots: HashSet::new(),
     }
@@ -1101,12 +1152,10 @@ pub fn clean(project_path: &str) -> Result<(), Box<dyn error::Error>> {
         });
 
     if let Some(project) = project {
-        for artifact_dir in project
-            .artifact_dirs()
-            .iter()
-            .copied()
-            .map(|ad| path::PathBuf::from(project_path).join(ad))
-            .filter(|ad| ad.exists())
+        for (_, artifact_dir) in project
+            .artifact_paths()
+            .into_iter()
+            .filter(|(_, path)| path.exists())
         {
             if let Err(e) = fs::remove_dir_all(&artifact_dir) {
                 eprintln!("error removing directory {:?}: {:?}", artifact_dir, e);
@@ -1164,6 +1213,73 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn cmake_custom_build_directories_are_sized_scanned_and_cleaned_safely() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("CMakeLists.txt"), "project(test)\n").unwrap();
+        fs::create_dir_all(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/main.cpp"), b"source").unwrap();
+        fs::create_dir_all(fixture.0.join("build-fast/CMakeFiles")).unwrap();
+        fs::write(fixture.0.join("build-fast/CMakeCache.txt"), b"cache").unwrap();
+        fs::write(fixture.0.join("build-fast/output.o"), b"generated").unwrap();
+        fs::create_dir(fixture.0.join("cache-only")).unwrap();
+        fs::write(fixture.0.join("cache-only/CMakeCache.txt"), b"decoy").unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: true,
+            deep: true,
+            worktrees: false,
+            project_filter: ProjectFilter::All,
+        };
+        let projects = scan(&fixture.0, &options)
+            .map(|result| match result {
+                Ok(project) => project,
+                Err(_) => panic!("scan CMake fixture without errors"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projects.len(),
+            1,
+            "build output must not be discovered as a project"
+        );
+        let project = &projects[0];
+        assert!(project
+            .artifact_paths()
+            .iter()
+            .any(|(label, path)| label == "build-fast" && path == &fixture.0.join("build-fast")));
+        assert!(!project
+            .artifact_paths()
+            .iter()
+            .any(|(_, path)| path == &fixture.0.join("cache-only")));
+        assert_eq!(
+            project.size(&options),
+            b"cache".len() as u64 + b"generated".len() as u64
+        );
+        let sizes = project.size_dirs(&options);
+        assert!(sizes
+            .dirs
+            .iter()
+            .any(|(name, _, artifact)| name == "build-fast" && *artifact));
+        assert!(sizes
+            .dirs
+            .iter()
+            .any(|(name, _, artifact)| name == "src" && !*artifact));
+
+        project.clean();
+        assert!(!fixture.0.join("build-fast").exists());
+        assert!(fixture.0.join("src/main.cpp").exists());
+        assert!(fixture.0.join("cache-only/CMakeCache.txt").exists());
+
+        fs::create_dir_all(fixture.0.join("build-fast/CMakeFiles")).unwrap();
+        fs::write(fixture.0.join("build-fast/CMakeCache.txt"), b"cache").unwrap();
+        clean(fixture.0.to_str().unwrap()).unwrap();
+        assert!(!fixture.0.join("build-fast").exists());
+        assert!(fixture.0.join("src/main.cpp").exists());
+        assert!(fixture.0.join("cache-only/CMakeCache.txt").exists());
     }
 
     #[test]

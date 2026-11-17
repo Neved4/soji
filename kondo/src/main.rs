@@ -284,15 +284,12 @@ fn discover(
         })
     {
         let artifact_dir_sizes: Vec<_> = project
-            .artifact_dirs()
-            .iter()
-            .copied()
-            .filter_map(
-                |dir| match dir_size(&project.path.join(dir), scan_options) {
-                    0 => None,
-                    size => Some((dir.to_owned(), size)),
-                },
-            )
+            .artifact_paths()
+            .into_iter()
+            .filter_map(|(dir, path)| match dir_size(&path, scan_options) {
+                0 => None,
+                size => Some((dir, size)),
+            })
             .collect();
         let project_artifact_bytes = artifact_dir_sizes.iter().map(|(_, bytes)| bytes).sum();
 
@@ -357,8 +354,7 @@ fn process_deletes(project_recv: Receiver<DeleteData>, force_rm: bool) -> Vec<(P
                 return None;
             }
             let mut failed = false;
-            for artifact_dir in project.artifact_dirs() {
-                let path = project.path.join(artifact_dir);
+            for (_, path) in project.artifact_paths() {
                 if !path.exists() {
                     continue;
                 }
