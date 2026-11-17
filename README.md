@@ -2,17 +2,17 @@
 > **This is basically upstream Kondo with these fork-specific features:**
 >
 > - Broader artifact detection, including generic generated folders and expanded language/framework build and cache directories.
-> - Deep scanning for nested projects and artifacts (`-D`), with an option to include ignored and hidden paths (`-i`). The CLI command is `soji`.
-> - Artifacts go to the system Trash or Recycle Bin by default so you can review them later. Use `--force-rm` (`-f`) for permanent removal.
+> - Deep scanning for nested projects and artifacts (`-D`, `--deep`), with an option to include ignored and hidden paths (`-i`, `--no-ignore`). The CLI command is `soji`.
+> - Artifacts go to the system Trash or Recycle Bin by default so you can review them later. Use `-f` or `--force-rm` for permanent removal.
 >
 > **New usage examples:**
 >
 > ```sh
-> soji -Din <dir> # List everything detected and show the total potential savings
-> soji -Di <dir> # Review each result and answer yes or no
+> soji --dry-run --no-ignore --deep <dir>         # List everything detected and show total potential savings
+> soji --no-ignore --deep <dir>                   # Review each result and answer yes or no
+> soji --all --no-ignore --deep <dir>             # Clean all detected artifacts without confirmation; move them to Trash
+> soji --all --force-rm --no-ignore --deep <dir>  # ⚠️ Clean all detected artifacts without confirmation and permanently delete them
 > ```
->
-> ⚠️ `-a` cleans all detected artifacts automatically without confirmation. Add `-f` to permanently delete them instead of moving them to the Trash.
 
 # Kondo 🧹
 
