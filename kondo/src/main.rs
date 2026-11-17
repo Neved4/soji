@@ -359,7 +359,7 @@ fn process_deletes(project_recv: Receiver<DeleteData>, force_rm: bool) -> Vec<(P
                     continue;
                 }
                 let result = if force_rm {
-                    fs::remove_dir_all(&path)
+                    remove_dir_all_with_retry(&path, |path| fs::remove_dir_all(path))
                 } else {
                     trash::delete(&path).map_err(|error| std::io::Error::other(error.to_string()))
                 };
@@ -371,6 +371,19 @@ fn process_deletes(project_recv: Receiver<DeleteData>, force_rm: bool) -> Vec<(P
             (!failed).then_some((project, artifact_bytes))
         })
         .collect()
+}
+
+fn remove_dir_all_with_retry(
+    path: &std::path::Path,
+    mut remove_dir_all: impl FnMut(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            remove_dir_all(path)
+        }
+        result => result,
+    }
 }
 
 fn interactive_prompt(
@@ -661,7 +674,7 @@ mod cli_tests {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::{discover, process_deletes, DiscoverData};
+    use super::{discover, process_deletes, remove_dir_all_with_retry, DiscoverData};
     use kondo_lib::{scan, ProjectFilter, ScanOptions};
     use std::{
         fs,
@@ -674,6 +687,37 @@ mod discovery_tests {
     };
 
     static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn retries_recursive_removal_once_for_directory_not_empty() {
+        let mut attempts = 0;
+        let result = remove_dir_all_with_retry(std::path::Path::new("artifact"), |_| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn returns_second_directory_not_empty_error_without_a_third_attempt() {
+        let mut attempts = 0;
+        let result = remove_dir_all_with_retry(std::path::Path::new("artifact"), |_| {
+            attempts += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty))
+        });
+
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::DirectoryNotEmpty
+        );
+        assert_eq!(attempts, 2);
+    }
 
     struct Fixture(PathBuf);
 
