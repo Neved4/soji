@@ -15,9 +15,9 @@ required_arg $CROSS 'CROSS'
 required_arg $TARGET_TRIPLE '<Target Triple>'
 
 if [ -z "$RELEASE_BUILD" ]; then
-    $CROSS build --locked --target $TARGET_TRIPLE
-    $CROSS build --locked --target $TARGET_TRIPLE --all-features
+    CARGO_HOME="$HOME/.cache/cargo" $CROSS build --locked --target $TARGET_TRIPLE
+    CARGO_HOME="$HOME/.cache/cargo" $CROSS build --locked --target $TARGET_TRIPLE --all-features
 else
-    $CROSS build --locked --target $TARGET_TRIPLE --all-features --release
+    CARGO_HOME="$HOME/.cache/cargo" $CROSS build --locked --target $TARGET_TRIPLE --all-features --release
 fi
 
