@@ -125,6 +125,7 @@ const SCAN_OPTIONS: &kondo_lib::ScanOptions = &kondo_lib::ScanOptions {
     same_file_system: false,
     no_ignore: false,
     deep: false,
+    worktrees: true,
 };
 
 fn setup(mut c: Commands) {

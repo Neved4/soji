@@ -65,6 +65,10 @@ struct Opt {
     #[arg(short, long)]
     same_filesystem: bool,
 
+    /// Do not scan linked Git worktrees found inside scanned repositories.
+    #[arg(long)]
+    no_worktrees: bool,
+
     /// Only directories with a file last modified n units of time ago will be looked at. Ex: 20d. Units are m: minutes, h: hours, d: days, w: weeks, M: months and y: years.
     #[arg(short, long, value_parser = parse_age_filter, default_value = "0d")]
     older: u64,
@@ -390,6 +394,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         same_file_system: opt.same_filesystem,
         no_ignore: opt.no_ignore,
         deep: opt.deep,
+        worktrees: !opt.no_worktrees,
     };
 
     let (proj_discover_send, proj_discover_recv) = std::sync::mpsc::sync_channel::<DiscoverData>(5);

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     error::{self, Error},
     fs,
     path::{self, Path},
@@ -426,10 +426,90 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     entry.file_name().to_string_lossy().starts_with('.')
 }
 
+/// Resolve only consistent Git worktree registrations, refusing stale, locked, or
+/// hand-written entries which point at a different directory.
+fn registered_worktrees(git_dir: &Path) -> Vec<path::PathBuf> {
+    let Ok(registry) = fs::canonicalize(git_dir.join("worktrees")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = registry.read_dir() else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = fs::canonicalize(entry.path()).ok()?;
+            if !metadata.starts_with(&registry) || metadata.join("locked").exists() {
+                return None;
+            }
+            let gitdir = fs::read_to_string(metadata.join("gitdir")).ok()?;
+            let gitdir = Path::new(gitdir.trim());
+            let gitdir = if gitdir.is_absolute() {
+                gitdir.to_path_buf()
+            } else {
+                metadata.join(gitdir)
+            };
+            if gitdir.file_name()? != ".git" {
+                return None;
+            }
+            let gitdir = fs::canonicalize(gitdir).ok()?;
+            let root = fs::canonicalize(gitdir.parent()?).ok()?;
+            if !root.is_dir() {
+                return None;
+            }
+            let backlink = fs::read_to_string(root.join(".git")).ok()?;
+            let backlink = backlink.trim().strip_prefix("gitdir:")?;
+            let backlink = Path::new(backlink.trim());
+            let backlink = if backlink.is_absolute() {
+                backlink.to_path_buf()
+            } else {
+                root.join(backlink)
+            };
+            (fs::canonicalize(backlink).ok()? == metadata).then_some(root)
+        })
+        .collect()
+}
+
+fn worktree_is_locked(path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(path.join(".git")) else {
+        return false;
+    };
+    let Some(gitdir) = contents.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let gitdir = Path::new(gitdir.trim());
+    let gitdir = if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        path.join(gitdir)
+    };
+    gitdir.join("locked").exists()
+}
+
+#[cfg(unix)]
+fn device(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|metadata| metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn device(_path: &Path) -> Option<u64> {
+    None
+}
+
 struct ProjectIter {
     it: walkdir::IntoIter,
     no_ignore: bool,
     deep: bool,
+    worktrees: bool,
+    follow_symlinks: bool,
+    same_file_system: bool,
+    display_root: path::PathBuf,
+    root: path::PathBuf,
+    root_device: Option<u64>,
+    pending: VecDeque<path::PathBuf>,
+    queued: HashSet<path::PathBuf>,
+    emitted: HashSet<path::PathBuf>,
     project_artifacts: HashMap<path::PathBuf, Vec<&'static str>>,
     project_artifact_paths: HashSet<path::PathBuf>,
     generic_roots: HashSet<path::PathBuf>,
@@ -446,7 +526,14 @@ impl Iterator for ProjectIter {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let entry: walkdir::DirEntry = match self.it.next() {
-                None => return None,
+                None => {
+                    let next_root = self.pending.pop_front()?;
+                    self.it = walkdir::WalkDir::new(next_root)
+                        .follow_links(self.follow_symlinks)
+                        .same_file_system(self.same_file_system)
+                        .into_iter();
+                    continue;
+                }
                 Some(Err(e)) => return Some(Err(Red::WalkdirError(e))),
                 Some(Ok(entry)) => entry,
             };
@@ -483,10 +570,14 @@ impl Iterator for ProjectIter {
                     {
                         continue;
                     }
-                    return Some(Ok(Project {
+                    let project = Project {
                         project_type: ProjectType::Generic,
                         path: parent.to_path_buf(),
-                    }));
+                    };
+                    if self.worktrees && !self.first_emit(&project.path) {
+                        continue;
+                    }
+                    return Some(Ok(project));
                 }
                 continue;
             }
@@ -494,11 +585,38 @@ impl Iterator for ProjectIter {
                 Err(e) => return Some(Err(Red::IOError(e))),
                 Ok(rd) => rd,
             };
+            let entries: Vec<_> = rd.filter_map(Result::ok).collect();
+            if self.worktrees
+                && entries.iter().any(|de| {
+                    de.file_name() == ".git" && de.file_type().is_ok_and(|ft| ft.is_dir())
+                })
+            {
+                for worktree in registered_worktrees(&entry.path().join(".git")) {
+                    let Ok(relative) = worktree.strip_prefix(&self.root) else {
+                        continue;
+                    };
+                    if self.root_device.is_some() && device(&worktree) != self.root_device {
+                        continue;
+                    }
+                    if self.queued.insert(worktree.clone()) {
+                        self.pending.push_back(self.display_root.join(relative));
+                    }
+                }
+            }
+            if self.worktrees
+                && entries.iter().any(|de| {
+                    de.file_name() == ".git" && de.file_type().is_ok_and(|ft| ft.is_file())
+                })
+                && worktree_is_locked(entry.path())
+            {
+                self.it.skip_current_dir();
+                continue;
+            }
             let mut python_project = false;
             // intentionally ignoring errors while iterating the ReadDir
             // can't return them because we'll lose the context of where we are
-            for dir_entry in rd
-                .filter_map(|rd| rd.ok())
+            for dir_entry in entries
+                .into_iter()
                 .filter(|de| de.file_type().map(|ft| ft.is_file()).unwrap_or(false))
                 .map(|de| de.file_name())
             {
@@ -577,6 +695,9 @@ impl Iterator for ProjectIter {
                     if !self.deep {
                         self.it.skip_current_dir();
                     }
+                    if self.worktrees && !self.first_emit(entry.path()) {
+                        break;
+                    }
                     return Some(Ok(project));
                 }
             }
@@ -596,9 +717,23 @@ impl Iterator for ProjectIter {
                 if !self.deep {
                     self.it.skip_current_dir();
                 }
+                if self.worktrees && !self.first_emit(entry.path()) {
+                    continue;
+                }
                 return Some(Ok(project));
             }
         }
+    }
+}
+
+impl ProjectIter {
+    fn first_emit(&mut self, path: &Path) -> bool {
+        let key = if self.follow_symlinks {
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        };
+        self.emitted.insert(key)
     }
 }
 
@@ -632,9 +767,17 @@ pub struct ScanOptions {
     pub same_file_system: bool,
     pub no_ignore: bool,
     pub deep: bool,
+    /// Discover registered linked Git worktrees inside the scan root.
+    pub worktrees: bool,
 }
 
 fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> ProjectIter {
+    let display_root = path.as_ref().to_path_buf();
+    let root = if options.worktrees {
+        fs::canonicalize(path).unwrap_or_else(|_| display_root.clone())
+    } else {
+        display_root.clone()
+    };
     ProjectIter {
         it: walkdir::WalkDir::new(path)
             .follow_links(options.follow_symlinks)
@@ -642,6 +785,19 @@ fn build_walkdir_iter<P: AsRef<path::Path>>(path: &P, options: &ScanOptions) -> 
             .into_iter(),
         no_ignore: options.no_ignore,
         deep: options.deep,
+        worktrees: options.worktrees,
+        follow_symlinks: options.follow_symlinks,
+        same_file_system: options.same_file_system,
+        display_root,
+        root: root.clone(),
+        root_device: if options.worktrees && options.same_file_system {
+            device(&root)
+        } else {
+            None
+        },
+        pending: VecDeque::new(),
+        queued: HashSet::from([root]),
+        emitted: HashSet::new(),
         project_artifacts: HashMap::new(),
         project_artifact_paths: HashSet::new(),
         generic_roots: HashSet::new(),
@@ -824,6 +980,7 @@ mod tests {
             same_file_system: false,
             no_ignore: false,
             deep: false,
+            worktrees: false,
         };
         let projects = scan(&fixture.0, &options)
             .map(|result| match result {
@@ -869,6 +1026,7 @@ mod tests {
             same_file_system: false,
             no_ignore: false,
             deep: false,
+            worktrees: false,
         };
 
         for marker in ["turbo.json", "turbo.jsonc"] {
@@ -920,6 +1078,7 @@ mod tests {
             same_file_system: false,
             no_ignore: false,
             deep: false,
+            worktrees: false,
         };
         let projects = scan(&fixture.0, &options)
             .map(|result| match result {
@@ -948,6 +1107,204 @@ mod tests {
         clean(fixture.0.to_str().unwrap()).unwrap();
 
         assert!(fixture.0.join(".pio").exists());
+    }
+
+    #[test]
+    fn linked_worktrees_are_scanned_once_and_only_within_the_root() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("scan");
+        let repo = root.join("repo");
+        let worktree = repo.join(".claude/worktrees/feature");
+        let metadata = repo.join(".git/worktrees/feature");
+        fs::create_dir_all(&metadata).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir_all(repo.join("target")).unwrap();
+        fs::write(worktree.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir_all(worktree.join("target")).unwrap();
+        fs::write(
+            metadata.join("gitdir"),
+            "../../../.claude/worktrees/feature/.git\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../../.git/worktrees/feature\n",
+        )
+        .unwrap();
+        let duplicate_metadata = repo.join(".git/worktrees/feature-alias");
+        fs::create_dir_all(&duplicate_metadata).unwrap();
+        fs::write(
+            duplicate_metadata.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        let visible_worktree = repo.join("visible-feature");
+        let visible_metadata = repo.join(".git/worktrees/visible-feature");
+        fs::create_dir_all(&visible_worktree).unwrap();
+        fs::create_dir_all(&visible_metadata).unwrap();
+        fs::write(visible_worktree.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(
+            visible_metadata.join("gitdir"),
+            format!("{}\n", visible_worktree.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            visible_worktree.join(".git"),
+            format!("gitdir: {}\n", visible_metadata.display()),
+        )
+        .unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: true,
+            worktrees: true,
+        };
+        let mut projects = scan(&root, &options)
+            .map(|result| match result {
+                Ok(project) => project.path,
+                Err(_) => panic!("scan fixture without filesystem errors"),
+            })
+            .collect::<Vec<_>>();
+        projects.sort();
+        assert_eq!(
+            projects,
+            [repo.clone(), worktree.clone(), visible_worktree.clone()]
+        );
+
+        // A registration outside the requested root is not queued, even if valid.
+        let outside = fixture.0.join("outside");
+        let outside_meta = repo.join(".git/worktrees/outside");
+        fs::create_dir_all(&outside_meta).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(
+            outside_meta.join("gitdir"),
+            format!("{}\n", outside.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            outside.join(".git"),
+            format!("gitdir: {}\n", outside_meta.display()),
+        )
+        .unwrap();
+        let mut projects = scan(&root, &options)
+            .map(|result| match result {
+                Ok(project) => project.path,
+                Err(_) => panic!("scan fixture without filesystem errors"),
+            })
+            .collect::<Vec<_>>();
+        projects.sort();
+        assert_eq!(projects, [repo, worktree, visible_worktree]);
+    }
+
+    #[test]
+    fn locked_worktrees_are_skipped_and_unregistered_metadata_is_ignored() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("scan");
+        let repo = root.join("repo");
+        let worktree = repo.join(".worktrees/locked");
+        let metadata = repo.join(".git/worktrees/locked");
+        fs::create_dir_all(&metadata).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(worktree.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(
+            metadata.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", metadata.display()),
+        )
+        .unwrap();
+        fs::write(metadata.join("locked"), "active worktree\n").unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+            worktrees: true,
+        };
+        assert_eq!(
+            scan(&root, &options)
+                .map(|result| match result {
+                    Ok(project) => project.path,
+                    Err(_) => panic!("scan fixture without filesystem errors"),
+                })
+                .collect::<Vec<_>>(),
+            [repo]
+        );
+    }
+
+    #[test]
+    fn scans_a_git_created_hidden_worktree() {
+        use std::process::Command;
+
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skipping: git is not available");
+            return;
+        }
+
+        fn git(repo: &std::path::Path, args: &[&str]) {
+            let output = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Soji",
+                    "-c",
+                    "user.email=soji@example.invalid",
+                ])
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let fixture = Fixture::new();
+        let repo = fixture.0.join("repo");
+        let worktree = repo.join(".claude/worktrees/feature");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+        fs::write(repo.join(".gitignore"), "target/\n.claude/\n").unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["add", "Cargo.toml", ".gitignore"]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                ".claude/worktrees/feature",
+            ],
+        );
+        fs::create_dir_all(worktree.join("target")).unwrap();
+
+        let options = ScanOptions {
+            follow_symlinks: false,
+            same_file_system: false,
+            no_ignore: false,
+            deep: false,
+            worktrees: true,
+        };
+        let projects = scan(&fixture.0, &options)
+            .map(|result| match result {
+                Ok(project) => project.path,
+                Err(_) => panic!("scan real Git worktree fixture without errors"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(projects, [repo, worktree]);
     }
 
     #[test]
